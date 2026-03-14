@@ -287,16 +287,39 @@ python3 "$SCRIPT" twilio-call "+15551230000" --message "Hello! This is Hermes ca
 
 ### E. Call with a prerecorded / custom voice message
 
+This is the main path for reusing Hermes's existing `text_to_speech` support.
+
+Use this when:
+- you want the call to use Hermes's configured TTS voice rather than Twilio `<Say>`
+- you want a one-way voice delivery (briefing, alert, joke, reminder, status update)
+- you do **not** need a live conversational phone call
+
 Generate or host audio separately, then:
 
 ```bash
-python3 "$SCRIPT" twilio-call "+15551230000" --audio-url "https://example.com/briefing.mp3"
+python3 "$SCRIPT" twilio-call "+155****0000" --audio-url "https://example.com/briefing.mp3"
 ```
 
-Useful pairing:
-- use Hermes `text_to_speech` to generate the MP3
-- make it publicly reachable
-- then place the call with `--audio-url`
+Recommended Hermes TTS -> Twilio Play workflow:
+
+1. Generate the audio with Hermes `text_to_speech`.
+2. Make the resulting MP3 publicly reachable.
+3. Place the Twilio call with `--audio-url`.
+
+Example agent flow:
+- Ask Hermes to create the message audio with `text_to_speech`
+- If needed, expose the file with a temporary static host / tunnel / object storage URL
+- Use `twilio-call --audio-url ...` to deliver it by phone
+
+Good hosting options for the MP3:
+- a temporary public object/storage URL
+- a short-lived tunnel to a local static file server
+- any existing HTTPS URL the phone provider can fetch directly
+
+Important note:
+- Hermes TTS is great for prerecorded outbound messages
+- Bland/Vapi are better for **live conversational AI calls** because they handle the real-time telephony audio stack themselves
+- Hermes STT/TTS alone is not being used here as a full duplex phone conversation engine; that would require a much heavier streaming/webhook integration than this skill is trying to introduce
 
 ### F. Navigate a phone tree / IVR with Twilio direct calling
 
