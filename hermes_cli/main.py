@@ -618,7 +618,6 @@ def _exec_in_container(container_info: dict, cli_args: list):
         container_info: dict with backend, container_name, exec_user, hermes_bin
         cli_args: the original CLI arguments (everything after 'hermes')
     """
-    import shutil
 
     backend = container_info["backend"]
     container_name = container_info["container_name"]
@@ -1181,8 +1180,6 @@ def cmd_gateway(args):
 def cmd_whatsapp(args):
     """Set up WhatsApp: choose mode, configure, install bridge, pair via QR."""
     _require_tty("whatsapp")
-    import subprocess
-    from pathlib import Path
     from hermes_cli.config import get_env_value, save_env_value
 
     print()
@@ -1330,7 +1327,6 @@ def cmd_whatsapp(args):
         except (EOFError, KeyboardInterrupt):
             response = "n"
         if response.lower() in ("y", "yes"):
-            import shutil
 
             shutil.rmtree(session_dir, ignore_errors=True)
             session_dir.mkdir(parents=True, exist_ok=True)
@@ -1427,8 +1423,6 @@ def select_provider_and_model(args=None):
 
     # Read effective provider the same way the CLI does at startup:
     # config.yaml model.provider > env var > auto-detect
-    import os
-
     config_provider = None
     model_cfg = config.get("model")
     if isinstance(model_cfg, dict):
@@ -2134,7 +2128,6 @@ def _model_flow_nous(config, current_model="", args=None):
         save_env_value,
     )
     from hermes_cli.nous_subscription import prompt_enable_tool_gateway
-    import argparse
 
     state = get_provider_auth_state("nous")
     if not state or not state.get("access_token"):
@@ -2302,7 +2295,6 @@ def _model_flow_openai_codex(config, current_model=""):
         DEFAULT_CODEX_BASE_URL,
     )
     from hermes_cli.codex_models import get_codex_model_ids
-    import argparse
 
     status = get_codex_auth_status()
     if not status.get("logged_in"):
@@ -4289,9 +4281,7 @@ def _clear_bytecode_cache(root: Path) -> int:
         ]
         if os.path.basename(dirpath) == "__pycache__":
             try:
-                import shutil as _shutil
-
-                _shutil.rmtree(dirpath)
+                shutil.rmtree(dirpath)
                 removed += 1
             except OSError:
                 pass
@@ -4363,7 +4353,6 @@ def _build_web_ui(web_dir: Path, *, fatal: bool = False) -> bool:
     """
     if not (web_dir / "package.json").exists():
         return True
-    import shutil
 
     npm = shutil.which("npm")
     if not npm:
@@ -4400,7 +4389,6 @@ def _update_via_zip(args):
     Used on Windows when git file I/O is broken (antivirus, NTFS filter
     drivers causing 'Invalid argument' errors on file creation).
     """
-    import shutil
     import tempfile
     import zipfile
     from urllib.request import urlretrieve
@@ -4477,7 +4465,6 @@ def _update_via_zip(args):
     # breaks on this machine, keep base deps and reinstall the remaining extras
     # individually so update does not silently strip working capabilities.
     print("→ Updating Python dependencies...")
-    import subprocess
 
     uv_bin = shutil.which("uv")
     if uv_bin:
@@ -8080,7 +8067,6 @@ Examples:
                     return
                 line = _json.dumps(data, ensure_ascii=False) + "\n"
                 if args.output == "-":
-                    import sys
 
                     sys.stdout.write(line)
                 else:
@@ -8090,7 +8076,6 @@ Examples:
             else:
                 sessions = db.export_all(source=args.source)
                 if args.output == "-":
-                    import sys
 
                     for s in sessions:
                         sys.stdout.write(_json.dumps(s, ensure_ascii=False) + "\n")
