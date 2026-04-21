@@ -78,6 +78,16 @@ termux = [
 ]
 dingtalk = ["dingtalk-stream>=0.20,<1", "alibabacloud-dingtalk>=2.0.0", "qrcode>=7.0,<8"]
 feishu = ["lark-oapi>=1.5.3,<2", "qrcode>=7.0,<8"]
+msteams = [
+  "botbuilder-core>=4.15,<5",
+  "botbuilder-schema>=4.15,<5",
+  "botframework-connector>=4.15,<5",
+  "msal>=1.28,<2",
+  "msal-extensions>=1.2,<2",
+  "azure-identity>=1.17,<2",
+  "msgraph-sdk>=1.4,<2",
+  "aiohttp>=3.13.3,<4",
+]
 web = ["fastapi>=0.104.0,<1", "uvicorn[standard]>=0.24.0,<1"]
 rl = [
   "atroposlib @ git+https://github.com/NousResearch/atropos.git@c20c85256e5a45ad31edf8b7276e9c5ee1995a30",
@@ -109,6 +119,7 @@ all = [
   "hermes-agent[voice]",
   "hermes-agent[dingtalk]",
   "hermes-agent[feishu]",
+  "hermes-agent[msteams]",
   "hermes-agent[mistral]",
   "hermes-agent[bedrock]",
   "hermes-agent[web]",

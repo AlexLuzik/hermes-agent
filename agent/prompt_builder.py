@@ -324,6 +324,20 @@ PLATFORM_HINTS = {
         "attachments, audio as file attachments. You can also include image URLs "
         "in markdown format ![alt](url) and they will be uploaded as attachments."
     ),
+    "msteams": (
+        "You are in a Microsoft Teams workspace communicating with your user. "
+        "Teams renders a limited subset of HTML, not markdown — use plain text "
+        "or short **bold** / *italic* / `code` / simple lists, which the adapter "
+        "converts to Teams-compatible HTML. In channels and group chats you are "
+        "addressed via @mentions; the adapter strips the mention from the text "
+        "before you see it. Replies stay threaded under the root post by "
+        "default. You can send media files natively: include "
+        "MEDIA:/absolute/path/to/file in your response. In DMs the user confirms "
+        "the upload via a FileConsent card; in channels and group chats files "
+        "are uploaded to SharePoint. You can also include image URLs in markdown "
+        "format ![alt](url) and they will be attached. Adaptive Cards are "
+        "supported for richer layouts when warranted."
+    ),
     "signal": (
         "You are on a text messaging communication platform, Signal. "
         "Please do not use markdown as it does not render. "

@@ -2838,6 +2838,18 @@ class GatewayRunner:
                 return None
             return MatrixAdapter(config)
 
+        elif platform == Platform.MSTEAMS:
+            from gateway.platforms.msteams import MsTeamsAdapter, check_msteams_requirements
+            if not check_msteams_requirements():
+                logger.warning(
+                    "MSTeams: botbuilder-core/msal/msgraph-sdk/aiohttp missing. "
+                    "Run: pip install 'hermes-agent[msteams]'"
+                )
+                return None
+            adapter = MsTeamsAdapter(config)
+            adapter.gateway_runner = self  # For cross-platform delivery
+            return adapter
+
         elif platform == Platform.API_SERVER:
             from gateway.platforms.api_server import APIServerAdapter, check_api_server_requirements
             if not check_api_server_requirements():
@@ -2903,6 +2915,7 @@ class GatewayRunner:
             Platform.SMS: "SMS_ALLOWED_USERS",
             Platform.MATTERMOST: "MATTERMOST_ALLOWED_USERS",
             Platform.MATRIX: "MATRIX_ALLOWED_USERS",
+            Platform.MSTEAMS: "MSTEAMS_ALLOWED_USERS",
             Platform.DINGTALK: "DINGTALK_ALLOWED_USERS",
             Platform.FEISHU: "FEISHU_ALLOWED_USERS",
             Platform.WECOM: "WECOM_ALLOWED_USERS",
@@ -2924,6 +2937,7 @@ class GatewayRunner:
             Platform.SMS: "SMS_ALLOW_ALL_USERS",
             Platform.MATTERMOST: "MATTERMOST_ALLOW_ALL_USERS",
             Platform.MATRIX: "MATRIX_ALLOW_ALL_USERS",
+            Platform.MSTEAMS: "MSTEAMS_ALLOW_ALL_USERS",
             Platform.DINGTALK: "DINGTALK_ALLOW_ALL_USERS",
             Platform.FEISHU: "FEISHU_ALLOW_ALL_USERS",
             Platform.WECOM: "WECOM_ALLOW_ALL_USERS",
@@ -3055,6 +3069,7 @@ class GatewayRunner:
                 Platform.SMS:      "SMS_ALLOWED_USERS",
                 Platform.MATTERMOST: "MATTERMOST_ALLOWED_USERS",
                 Platform.MATRIX:   "MATRIX_ALLOWED_USERS",
+                Platform.MSTEAMS:  "MSTEAMS_ALLOWED_USERS",
                 Platform.DINGTALK: "DINGTALK_ALLOWED_USERS",
                 Platform.FEISHU:   "FEISHU_ALLOWED_USERS",
                 Platform.WECOM:    "WECOM_ALLOWED_USERS",
@@ -7604,7 +7619,7 @@ class GatewayRunner:
     # programmatic interfaces that should not trigger system updates.
     _UPDATE_ALLOWED_PLATFORMS = frozenset({
         Platform.TELEGRAM, Platform.DISCORD, Platform.SLACK, Platform.WHATSAPP,
-        Platform.SIGNAL, Platform.MATTERMOST, Platform.MATRIX,
+        Platform.SIGNAL, Platform.MATTERMOST, Platform.MATRIX, Platform.MSTEAMS,
         Platform.HOMEASSISTANT, Platform.EMAIL, Platform.SMS, Platform.DINGTALK,
         Platform.FEISHU, Platform.WECOM, Platform.WECOM_CALLBACK, Platform.WEIXIN, Platform.BLUEBUBBLES, Platform.QQBOT, Platform.LOCAL,
     })

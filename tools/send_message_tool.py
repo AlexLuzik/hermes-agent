@@ -120,7 +120,7 @@ SEND_MESSAGE_SCHEMA = {
             },
             "target": {
                 "type": "string",
-                "description": "Delivery target. Format: 'platform' (uses home channel), 'platform:#channel-name', 'platform:chat_id', or 'platform:chat_id:thread_id' for Telegram topics and Discord threads. Examples: 'telegram', 'telegram:-1001234567890:17585', 'discord:999888777:555444333', 'discord:#bot-home', 'slack:#engineering', 'signal:+155****4567', 'matrix:!roomid:server.org', 'matrix:@user:server.org'"
+                "description": "Delivery target. Format: 'platform' (uses home channel), 'platform:#channel-name', 'platform:chat_id', or 'platform:chat_id:thread_id' for Telegram topics and Discord threads. Examples: 'telegram', 'telegram:-1001234567890:17585', 'discord:999888777:555444333', 'discord:#bot-home', 'slack:#engineering', 'signal:+155****4567', 'matrix:!roomid:server.org', 'matrix:@user:server.org', 'msteams:19:abcdef@thread.tacv2'"
             },
             "message": {
                 "type": "string",
@@ -207,6 +207,7 @@ def _handle_send(args):
         "qqbot": Platform.QQBOT,
         "matrix": Platform.MATRIX,
         "mattermost": Platform.MATTERMOST,
+        "msteams": Platform.MSTEAMS,
         "homeassistant": Platform.HOMEASSISTANT,
         "dingtalk": Platform.DINGTALK,
         "feishu": Platform.FEISHU,
@@ -332,6 +333,10 @@ def _parse_target_ref(platform_name: str, target_ref: str):
         return target_ref, None, True
     # Matrix room IDs (start with !) and user IDs (start with @) are explicit
     if platform_name == "matrix" and (target_ref.startswith("!") or target_ref.startswith("@")):
+        return target_ref, None, True
+    # Teams conversation IDs ("19:xxx@thread.tacv2", "a:xxx", AAD object IDs)
+    # contain colons and letters; treat any non-empty ref as an explicit chat_id.
+    if platform_name == "msteams" and target_ref:
         return target_ref, None, True
     return None, None, False
 
@@ -559,6 +564,8 @@ async def _send_to_platform(platform, pconfig, chat_id, message, thread_id=None,
             result = await _send_mattermost(pconfig.token, pconfig.extra, chat_id, chunk)
         elif platform == Platform.MATRIX:
             result = await _send_matrix(pconfig.token, pconfig.extra, chat_id, chunk)
+        elif platform == Platform.MSTEAMS:
+            result = await _send_msteams(pconfig.extra, chat_id, chunk, thread_id=thread_id)
         elif platform == Platform.HOMEASSISTANT:
             result = await _send_homeassistant(pconfig.token, pconfig.extra, chat_id, chunk)
         elif platform == Platform.DINGTALK:
@@ -1197,6 +1204,21 @@ async def _send_matrix(token, extra, chat_id, message):
         return {"success": True, "platform": "matrix", "chat_id": chat_id, "message_id": data.get("event_id")}
     except Exception as e:
         return _error(f"Matrix send failed: {e}")
+
+
+async def _send_msteams(extra, chat_id, message, thread_id=None):
+    """Send a message directly to Microsoft Teams without requiring the gateway.
+
+    Used by the send_message tool and cron scheduler when the gateway is not
+    running (e.g. cron jobs invoked out-of-process).  C1 stub — the real
+    implementation mints a Bot Framework token via MSAL, looks up the cached
+    serviceUrl for the conversation in ``~/.hermes/msteams/service_urls.json``,
+    and POSTs to ``{serviceUrl}/v3/conversations/{chat_id}/activities``.
+    """
+    return _error(
+        "MSTeams direct-send not yet implemented. "
+        "Start the gateway with MSTEAMS_APP_ID set to send Teams messages."
+    )
 
 
 async def _send_matrix_via_adapter(pconfig, chat_id, message, media_files=None, thread_id=None):
