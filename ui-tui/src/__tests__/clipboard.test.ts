@@ -34,6 +34,7 @@ describe('writeClipboardText', () => {
 
   it('writes text to pbcopy on macOS', async () => {
     const stdin = { end: vi.fn() }
+
     const child = {
       once: vi.fn((event: string, cb: (code?: number) => void) => {
         if (event === 'close') {
@@ -44,10 +45,15 @@ describe('writeClipboardText', () => {
       }),
       stdin
     }
+
     const start = vi.fn().mockReturnValue(child)
 
     await expect(writeClipboardText('hello world', 'darwin', start as any)).resolves.toBe(true)
-    expect(start).toHaveBeenCalledWith('pbcopy', [], expect.objectContaining({ stdio: ['pipe', 'ignore', 'ignore'], windowsHide: true }))
+    expect(start).toHaveBeenCalledWith(
+      'pbcopy',
+      [],
+      expect.objectContaining({ stdio: ['pipe', 'ignore', 'ignore'], windowsHide: true })
+    )
     expect(stdin.end).toHaveBeenCalledWith('hello world')
   })
 
@@ -62,6 +68,7 @@ describe('writeClipboardText', () => {
       }),
       stdin: { end: vi.fn() }
     }
+
     const start = vi.fn().mockReturnValue(child)
 
     await expect(writeClipboardText('hello world', 'darwin', start as any)).resolves.toBe(false)

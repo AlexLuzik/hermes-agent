@@ -494,9 +494,11 @@ export function TextInput({
     }
 
     const range = selRange()
+
     const nextValue = range
       ? vRef.current.slice(0, range.start) + cleaned + vRef.current.slice(range.end)
       : vRef.current.slice(0, curRef.current) + cleaned + vRef.current.slice(curRef.current)
+
     const nextCursor = range ? range.start + cleaned.length : curRef.current + cleaned.length
 
     commit(nextValue, nextCursor)
@@ -506,7 +508,12 @@ export function TextInput({
     (inp: string, k: Key, event: InputEvent) => {
       const eventRaw = event.keypress.raw
 
-      if (eventRaw === '\x1bv' || eventRaw === '\x1bV' || eventRaw === '\x16' || (isMac && k.meta && inp.toLowerCase() === 'v')) {
+      if (
+        eventRaw === '\x1bv' ||
+        eventRaw === '\x1bV' ||
+        eventRaw === '\x16' ||
+        (isMac && k.meta && inp.toLowerCase() === 'v')
+      ) {
         if (cbPaste.current) {
           return void emitPaste({ cursor: curRef.current, hotkey: true, text: '', value: vRef.current })
         }
