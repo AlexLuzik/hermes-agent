@@ -42,6 +42,7 @@ from gateway.platforms.msteams.auth import (
     CredentialProvider,
     build_credential_provider,
 )
+from gateway.platforms.msteams.graph import GraphClient
 
 logger = logging.getLogger(__name__)
 
@@ -304,16 +305,22 @@ class MsTeamsAdapter(BasePlatformAdapter):
             extra.get("teams") or {},
         )
 
-        # Credentials are built lazily in connect() so a misconfigured
-        # adapter can still be constructed for inspection (status display,
-        # tests, setup wizards that probe the PlatformConfig).
+        # SharePoint: required for channel/group file uploads via Graph.
+        self._sharepoint_site_id: str = str(extra.get("sharepoint_site_id") or "")
+        self._sharepoint_folder: str = str(extra.get("sharepoint_folder") or "Hermes")
+
+        # Credentials + Graph are built lazily in connect() so a
+        # misconfigured adapter can still be constructed for inspection
+        # (status display, tests, setup wizards).
         self._extra_snapshot: Dict[str, Any] = extra
         self._credential_provider: Optional[CredentialProvider] = None
+        self._graph: Optional[GraphClient] = None
 
         # Runtime state
         self._aiohttp_runner = None
         self._aiohttp_site = None
         self._service_urls: Dict[str, str] = load_service_urls()
+        self._team_ids_by_chat: Dict[str, str] = {}
         self._http_session = None  # aiohttp.ClientSession, lazy
         self._save_lock = asyncio.Lock()
 
@@ -339,6 +346,8 @@ class MsTeamsAdapter(BasePlatformAdapter):
         except AuthError as exc:
             self._set_fatal_error("msteams_auth", str(exc), retryable=False)
             return False
+
+        self._graph = GraphClient(self._credential_provider)
 
         if not self._acquire_platform_lock(
             "msteams-endpoint",
@@ -395,6 +404,10 @@ class MsTeamsAdapter(BasePlatformAdapter):
             with contextlib.suppress(Exception):
                 await self._http_session.close()
             self._http_session = None
+        if self._graph is not None:
+            with contextlib.suppress(Exception):
+                await self._graph.close()
+            self._graph = None
         if self._credential_provider is not None:
             with contextlib.suppress(Exception):
                 await self._credential_provider.close()
@@ -570,6 +583,11 @@ class MsTeamsAdapter(BasePlatformAdapter):
             channel = channel_data.get("channel") or {}
             team_id = team.get("id")
             channel_id = channel.get("id")
+            if team_id and chat_id:
+                # Remember the parent team so get_chat_info / Graph
+                # uploads can address the channel even after the
+                # triggering activity is gone from adapter memory.
+                self._team_ids_by_chat[chat_id] = team_id
 
         # The Bot Framework thread id for "threaded" conversations is the
         # conversation.id itself; replyToId points to the parent message.
@@ -826,10 +844,73 @@ class MsTeamsAdapter(BasePlatformAdapter):
             )
 
     async def get_chat_info(self, chat_id: str) -> Dict[str, Any]:
-        """Minimal chat-info stub.  C4 augments this with Graph lookups
-        (display name, channel info, team info)."""
+        """Return display metadata for *chat_id* using Graph when possible.
+
+        Falls back to a minimal stub when Graph is unreachable or when
+        we don't have a team id for the conversation (e.g. DMs — the
+        Bot Framework doesn't hand us a Graph-queryable identifier for
+        those until the user sends a message, which already captured
+        chat_type via the session).
+        """
         chat_type = "channel" if chat_id.startswith("19:") else "dm"
-        return {"name": chat_id, "type": chat_type, "chat_id": chat_id}
+        info: Dict[str, Any] = {"name": chat_id, "type": chat_type, "chat_id": chat_id}
+        if self._graph is None or chat_type != "channel":
+            return info
+
+        team_id = self._team_ids_by_chat.get(chat_id)
+        if not team_id:
+            return info
+        channels = await self._graph.list_channels(team_id)
+        for entry in channels:
+            if entry.get("id") == chat_id:
+                info["name"] = entry.get("display_name") or chat_id
+                info["description"] = entry.get("description")
+                info["membership_type"] = entry.get("membership_type")
+                info["team_id"] = team_id
+                break
+        return info
+
+    # ------------------------------------------------------------------
+    # Graph-backed helpers (history, user resolution, uploads)
+    # ------------------------------------------------------------------
+
+    async def fetch_channel_history(
+        self, team_id: str, channel_id: str, limit: Optional[int] = None,
+    ) -> List[Dict[str, Any]]:
+        """Oldest-first recent messages in a channel — empty if Graph
+        cannot reach the conversation or the permission is missing."""
+        if self._graph is None:
+            return []
+        top = limit if limit is not None else self._history_limit
+        return await self._graph.fetch_channel_messages(team_id, channel_id, top=top)
+
+    async def resolve_user(self, aad_object_id: str) -> Optional[Dict[str, Any]]:
+        """Display name / email / role for an AAD user, or ``None``."""
+        if self._graph is None or not aad_object_id:
+            return None
+        return await self._graph.resolve_user(aad_object_id)
+
+    async def upload_channel_file(
+        self, chat_id: str, filename: str, content: bytes,
+    ) -> Optional[str]:
+        """Upload *content* to the configured SharePoint site and return
+        the resulting ``webUrl``.  No-op (returns ``None``) when the
+        adapter has no Graph client or the site id is not configured —
+        the caller downgrades to an in-text link or a plain message.
+        """
+        if self._graph is None or not self._sharepoint_site_id:
+            return None
+        # Isolate each conversation in its own folder under the bot's
+        # shared SharePoint space so uploads from different channels
+        # don't collide on filename.
+        safe_chat_id = chat_id.replace(":", "_").replace("@", "_at_")
+        folder = f"{self._sharepoint_folder}/{safe_chat_id}"
+        return await self._graph.upload_to_sharepoint(
+            site_id=self._sharepoint_site_id,
+            folder_path=folder,
+            filename=filename,
+            content=content,
+        )
 
 
 def _activities_url(service_url: str, chat_id: str) -> str:
