@@ -21,11 +21,9 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-import html
 import json
 import logging
 import re
-import time
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urlparse
 
@@ -42,7 +40,27 @@ from gateway.platforms.msteams.auth import (
     CredentialProvider,
     build_credential_provider,
 )
+from gateway.platforms.msteams.cards import (
+    build_adaptive_card,
+    build_file_consent_card,
+    build_file_download_card,
+    build_file_info_card,
+    markdown_to_teams_html,
+)
 from gateway.platforms.msteams.graph import GraphClient
+
+# Re-exported for backward compatibility — the converter moved to
+# cards.py in C5 but existing tests import it through this module.
+__all__ = [
+    "MsTeamsAdapter",
+    "check_msteams_requirements",
+    "markdown_to_teams_html",
+    "strip_bot_mention",
+    "build_adaptive_card",
+    "build_file_consent_card",
+    "build_file_download_card",
+    "build_file_info_card",
+]
 
 logger = logging.getLogger(__name__)
 
@@ -70,108 +88,6 @@ def check_msteams_requirements() -> bool:
         logger.debug("MSTeams dependency missing: %s", exc)
         return False
     return True
-
-
-# ---------------------------------------------------------------------------
-# Markdown → Teams HTML
-# ---------------------------------------------------------------------------
-# Teams renders a narrow subset of HTML, NOT markdown.  The converter
-# below handles the shapes the agent realistically emits — bold, italic,
-# inline code, fenced code blocks, links, and simple bullet/numbered
-# lists — and leaves everything else as HTML-escaped text.  Input is
-# escaped *first* so an LLM-emitted `<script>` stays rendered as text.
-# Card-rich formatting lives in C5's cards.py.
-
-_CODE_FENCE_RE = re.compile(r"```(\w+)?\n(.*?)```", re.DOTALL)
-_INLINE_CODE_RE = re.compile(r"`([^`\n]+)`")
-_BOLD_RE = re.compile(r"\*\*([^*\n]+)\*\*")
-_ITALIC_RE = re.compile(r"(?<!\*)\*([^*\n]+)\*(?!\*)")
-_ITALIC_UNDER_RE = re.compile(r"(?<!_)_([^_\n]+)_(?!_)")
-_LINK_RE = re.compile(r"\[([^\]]+)\]\(([^\s\)]+)\)")
-_LIST_ITEM_RE = re.compile(r"^(\s*)([-*]|\d+\.)\s+(.*)$")
-
-
-def markdown_to_teams_html(text: str) -> str:
-    """Convert a restricted markdown dialect to Teams-safe HTML.
-
-    The output is suitable as the ``text`` field of an outgoing activity
-    with ``textFormat="xml"`` (which Teams treats as HTML).  Anything
-    the converter doesn't recognise is passed through HTML-escaped, so
-    accidental stray angle brackets never render as live tags.
-    """
-    if not text:
-        return ""
-
-    # Pull out fenced code blocks BEFORE HTML-escaping so the inner
-    # content is escaped once, not twice.
-    placeholders: Dict[str, str] = {}
-
-    def _stash(block_html: str) -> str:
-        token = f"\x00CODE{len(placeholders)}\x00"
-        placeholders[token] = block_html
-        return token
-
-    def _fence_sub(m: re.Match) -> str:
-        body = html.escape(m.group(2).rstrip("\n"))
-        return _stash(f"<pre><code>{body}</code></pre>")
-
-    text = _CODE_FENCE_RE.sub(_fence_sub, text)
-
-    # Inline code — same stash pattern so `**foo**` inside backticks
-    # stays literal.
-    def _inline_code_sub(m: re.Match) -> str:
-        return _stash(f"<code>{html.escape(m.group(1))}</code>")
-
-    text = _INLINE_CODE_RE.sub(_inline_code_sub, text)
-
-    # Now escape the remaining text (placeholders are safe — they
-    # contain only NUL + digits + ASCII letters).
-    text = html.escape(text)
-
-    # Apply inline styling on the escaped text.
-    text = _BOLD_RE.sub(r"<b>\1</b>", text)
-    text = _ITALIC_RE.sub(r"<i>\1</i>", text)
-    text = _ITALIC_UNDER_RE.sub(r"<i>\1</i>", text)
-    text = _LINK_RE.sub(
-        lambda m: f'<a href="{m.group(2)}">{m.group(1)}</a>', text,
-    )
-
-    # Simple single-level lists: contiguous `- ` / `* ` / `1. ` lines.
-    lines = text.split("\n")
-    rendered: List[str] = []
-    list_buffer: List[str] = []
-    list_kind: Optional[str] = None  # 'ul' | 'ol'
-
-    def _flush_list():
-        nonlocal list_buffer, list_kind
-        if list_buffer and list_kind:
-            rendered.append(f"<{list_kind}>" + "".join(list_buffer) + f"</{list_kind}>")
-            list_buffer = []
-            list_kind = None
-
-    for raw in lines:
-        m = _LIST_ITEM_RE.match(raw)
-        if m:
-            kind = "ol" if m.group(2)[0].isdigit() else "ul"
-            if list_kind and list_kind != kind:
-                _flush_list()
-            list_kind = kind
-            list_buffer.append(f"<li>{m.group(3)}</li>")
-        else:
-            _flush_list()
-            rendered.append(raw)
-
-    _flush_list()
-    text = "\n".join(rendered)
-
-    # Restore code placeholders.
-    for token, block in placeholders.items():
-        text = text.replace(token, block)
-
-    # Teams renders <br> for single line breaks; double newlines become
-    # paragraph breaks.
-    text = text.replace("\n\n", "<br><br>").replace("\n", "<br>")
-    return text
 
 
 # ---------------------------------------------------------------------------
@@ -323,6 +239,11 @@ class MsTeamsAdapter(BasePlatformAdapter):
         self._team_ids_by_chat: Dict[str, str] = {}
         self._http_session = None  # aiohttp.ClientSession, lazy
         self._save_lock = asyncio.Lock()
+        # Pending DM uploads awaiting FileConsent response.  Keyed by
+        # the upload_id stashed in the FileConsentCard acceptContext.
+        # Bytes are buffered in memory — the consent/invoke response
+        # completes quickly in practice so this doesn't grow.
+        self._pending_uploads: Dict[str, Dict[str, Any]] = {}
 
     @property
     def name(self) -> str:
@@ -464,9 +385,10 @@ class MsTeamsAdapter(BasePlatformAdapter):
         if activity_type == "typing":
             return web.Response(status=200)
         if activity_type == "invoke":
-            # Adaptive Card / FileConsent responses arrive here.  C3
-            # accepts them with 200 so Teams stops retrying; real
-            # handling lands in C5.
+            invoke_name = (getattr(activity, "name", "") or "").lower()
+            if invoke_name == "fileconsent/invoke":
+                status = await self._handle_file_consent_invoke(activity)
+                return web.Response(status=status)
             return web.Response(status=200)
         if activity_type != "message":
             return web.Response(status=200)
@@ -770,13 +692,254 @@ class MsTeamsAdapter(BasePlatformAdapter):
         reply_to: Optional[str] = None,
         metadata=None,
     ) -> SendResult:
-        """C3: fall back to sending the URL in text.  C4 replaces this
-        with a native image attachment using Graph for channel uploads."""
+        """Send an image.  In channels with SharePoint configured, downloads
+        the image and re-uploads it so it renders as a first-class file
+        card.  Everywhere else, falls back to emitting the URL in text.
+        """
+        if self._is_channel_chat(chat_id) and self._sharepoint_site_id:
+            data, filename = await self._download_bytes(image_url)
+            if data is not None:
+                return await self._send_channel_file(
+                    chat_id, filename or "image.png", data,
+                    caption=caption, reply_to=reply_to,
+                )
         parts: List[str] = []
         if caption:
             parts.append(caption)
         parts.append(image_url)
         return await self.send(chat_id, "\n".join(parts), reply_to=reply_to)
+
+    async def send_image_file(
+        self,
+        chat_id: str,
+        image_path: str,
+        caption: Optional[str] = None,
+        reply_to: Optional[str] = None,
+        metadata=None,
+    ) -> SendResult:
+        return await self._send_local_file(chat_id, image_path, caption, reply_to)
+
+    async def send_document(
+        self,
+        chat_id: str,
+        document_path: str,
+        caption: Optional[str] = None,
+        reply_to: Optional[str] = None,
+        metadata=None,
+    ) -> SendResult:
+        return await self._send_local_file(chat_id, document_path, caption, reply_to)
+
+    async def send_video(
+        self,
+        chat_id: str,
+        video_path: str,
+        caption: Optional[str] = None,
+        reply_to: Optional[str] = None,
+        metadata=None,
+    ) -> SendResult:
+        return await self._send_local_file(chat_id, video_path, caption, reply_to)
+
+    async def _send_local_file(
+        self, chat_id: str, path: str,
+        caption: Optional[str], reply_to: Optional[str],
+    ) -> SendResult:
+        """Dispatch a local file to the right Teams surface.
+
+        DMs → FileConsentCard (user accepts; adapter PUTs bytes to the
+        returned upload URL, then posts a FileInfoCard).  Channels and
+        group chats → SharePoint upload via Graph + a file.download.info
+        attachment so the file renders as a proper Teams file card.
+        """
+        import os
+        if not path or not os.path.isfile(path):
+            return SendResult(
+                success=False, error=f"file not found: {path}", retryable=False,
+            )
+        try:
+            with open(path, "rb") as fh:
+                data = fh.read()
+        except Exception as exc:
+            return SendResult(
+                success=False, error=f"read {path}: {exc}", retryable=False,
+            )
+        filename = os.path.basename(path)
+        if self._is_channel_chat(chat_id):
+            return await self._send_channel_file(
+                chat_id, filename, data, caption=caption, reply_to=reply_to,
+            )
+        return await self._send_dm_file_consent(
+            chat_id, filename, data, caption=caption, reply_to=reply_to,
+        )
+
+    def _is_channel_chat(self, chat_id: str) -> bool:
+        # Teams channel conversation ids start with "19:".  Group and DM
+        # conversations use different prefixes ("a:", "19:…@unq.gbl.spaces").
+        # We treat any chat with a team id on record (or a "19:" prefix
+        # without a DM suffix) as a channel for upload routing purposes.
+        if chat_id in self._team_ids_by_chat:
+            return True
+        return chat_id.startswith("19:") and "@thread." in chat_id
+
+    async def _send_channel_file(
+        self, chat_id: str, filename: str, data: bytes,
+        caption: Optional[str] = None, reply_to: Optional[str] = None,
+    ) -> SendResult:
+        """Upload *data* to SharePoint and post a file.download.info card."""
+        if not self._sharepoint_site_id:
+            return SendResult(
+                success=False,
+                error=(
+                    "MSTEAMS_SHAREPOINT_SITE_ID is not configured — "
+                    "channel file uploads require a SharePoint site"
+                ),
+                retryable=False,
+            )
+        url = await self.upload_channel_file(chat_id, filename, data)
+        if not url:
+            return SendResult(
+                success=False,
+                error="SharePoint upload failed (see msteams.graph log lines)",
+                retryable=True,
+            )
+        attachment = build_file_download_card(filename, content_url=url)
+        payload: Dict[str, Any] = {
+            "type": "message",
+            "attachments": [attachment],
+        }
+        if caption:
+            payload["text"] = markdown_to_teams_html(caption)
+            payload["textFormat"] = "xml"
+        if reply_to:
+            payload["replyToId"] = reply_to
+        return await self._post_activity(chat_id, payload)
+
+    async def _send_dm_file_consent(
+        self, chat_id: str, filename: str, data: bytes,
+        caption: Optional[str] = None, reply_to: Optional[str] = None,
+    ) -> SendResult:
+        """Initiate the FileConsent flow for a DM upload.
+
+        The actual file bytes sit in ``_pending_uploads`` until the user
+        accepts; the invoke handler completes the upload and posts a
+        FileInfoCard.  A decline from the user simply drops the entry.
+        """
+        size = len(data)
+        context = {"filename": filename, "service_url_chat_id": chat_id}
+        card = build_file_consent_card(
+            filename=filename, size_bytes=size,
+            description=caption or f"Hermes wants to send you {filename}",
+            accept_context=context,
+            decline_context=context,
+        )
+        upload_id = card["content"]["acceptContext"]["upload_id"]
+        self._pending_uploads[upload_id] = {
+            "filename": filename,
+            "bytes": data,
+            "chat_id": chat_id,
+            "caption": caption,
+            "reply_to": reply_to,
+        }
+        payload: Dict[str, Any] = {
+            "type": "message",
+            "attachments": [card],
+        }
+        if caption:
+            payload["text"] = markdown_to_teams_html(caption)
+            payload["textFormat"] = "xml"
+        if reply_to:
+            payload["replyToId"] = reply_to
+        return await self._post_activity(chat_id, payload)
+
+    async def _handle_file_consent_invoke(self, activity) -> int:
+        """Resolve a FileConsent accept/decline invoke.
+
+        Returns the HTTP status the adapter should reply with.  Any
+        recoverable error returns 200 (Teams stops retrying) after
+        logging — silence is better than a retry loop for a declined
+        upload.
+        """
+        value = getattr(activity, "value", None)
+        if not isinstance(value, dict):
+            logger.warning("msteams: fileConsent/invoke without value dict")
+            return 200
+        action = str(value.get("action") or "").lower()
+        context = value.get("context") or {}
+        upload_id = str(context.get("upload_id") or "")
+        pending = self._pending_uploads.pop(upload_id, None) if upload_id else None
+        if pending is None:
+            logger.info(
+                "msteams: fileConsent invoke for unknown upload_id=%r", upload_id,
+            )
+            return 200
+        if action != "accept":
+            logger.info(
+                "msteams: fileConsent declined for %s", pending["filename"],
+            )
+            return 200
+
+        upload_info = value.get("uploadInfo") or {}
+        upload_url = upload_info.get("uploadUrl")
+        unique_id = upload_info.get("uniqueId") or ""
+        file_type = upload_info.get("fileType") or ""
+        if not upload_url:
+            logger.warning(
+                "msteams: fileConsent/invoke missing uploadInfo.uploadUrl",
+            )
+            return 200
+
+        session = await self._get_http_session()
+        import aiohttp
+        try:
+            async with session.put(
+                upload_url,
+                data=pending["bytes"],
+                headers={
+                    "Content-Type": "application/octet-stream",
+                    "Content-Length": str(len(pending["bytes"])),
+                    "Content-Range": f"bytes 0-{len(pending['bytes']) - 1}/{len(pending['bytes'])}",
+                },
+            ) as resp:
+                if resp.status not in (200, 201):
+                    body = await resp.text()
+                    logger.warning(
+                        "msteams: fileConsent upload failed: %s %s",
+                        resp.status, body[:200],
+                    )
+                    return 200
+        except aiohttp.ClientError as exc:
+            logger.warning("msteams: fileConsent upload transport: %s", exc)
+            return 200
+
+        info_card = build_file_info_card(
+            filename=pending["filename"],
+            unique_id=unique_id,
+            file_type=file_type or "file",
+        )
+        follow_payload: Dict[str, Any] = {
+            "type": "message",
+            "attachments": [info_card],
+        }
+        await self._post_activity(pending["chat_id"], follow_payload)
+        return 200
+
+    async def _download_bytes(self, url: str) -> Tuple[Optional[bytes], Optional[str]]:
+        """Fetch *url*, returning ``(bytes, filename)`` or ``(None, None)``
+        on any error.  Used when the agent emits an image URL the
+        adapter wants to re-upload to SharePoint."""
+        import os
+        session = await self._get_http_session()
+        try:
+            async with session.get(url) as resp:
+                if resp.status != 200:
+                    logger.warning("msteams: image download status=%s", resp.status)
+                    return None, None
+                data = await resp.read()
+        except Exception as exc:
+            logger.warning("msteams: image download failed: %s", exc)
+            return None, None
+        parsed = urlparse(url)
+        filename = os.path.basename(parsed.path) or "attachment.bin"
+        return data, filename
 
     async def _post_activity(
         self, chat_id: str, payload: Dict[str, Any],

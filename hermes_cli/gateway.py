@@ -2678,6 +2678,48 @@ def _setup_wecom():
     _setup_standard_platform(wecom_platform)
 
 
+def _setup_msteams():
+    """Configure Microsoft Teams with auth-type-aware follow-up.
+
+    Delegates the App ID / tenant / secret / allowlist prompts to
+    ``_setup_standard_platform``.  Afterwards, if the user picked
+    ``MSTEAMS_AUTH_TYPE=federated`` we ask for certificate or Managed
+    Identity details that the standard wizard doesn't know about.
+    """
+    msteams_platform = next(p for p in _PLATFORMS if p["key"] == "msteams")
+    _setup_standard_platform(msteams_platform)
+
+    auth_type = (get_env_value("MSTEAMS_AUTH_TYPE") or "secret").strip().lower()
+    if auth_type != "federated":
+        return
+
+    print()
+    print_info(
+        "Federated auth: supply a certificate OR enable Azure Managed Identity.",
+    )
+    use_mi = prompt_yes_no(
+        "  Use Azure Managed Identity (only works on Azure compute)?", False,
+    )
+    if use_mi:
+        save_env_value("MSTEAMS_USE_MANAGED_IDENTITY", "true")
+        mi_id = prompt(
+            "  Managed Identity client ID (blank = system-assigned)",
+            password=False,
+        )
+        save_env_value("MSTEAMS_MANAGED_IDENTITY_CLIENT_ID", (mi_id or "").strip())
+        return
+
+    cert_path = prompt(
+        "  Path to PEM file with private key + certificate", password=False,
+    )
+    save_env_value("MSTEAMS_CERTIFICATE_PATH", (cert_path or "").strip())
+    cert_thumb = prompt(
+        "  Certificate thumbprint (SHA-1, registered in Entra ID)",
+        password=False,
+    )
+    save_env_value("MSTEAMS_CERTIFICATE_THUMBPRINT", (cert_thumb or "").strip())
+
+
 def _is_service_installed() -> bool:
     """Check if the gateway is installed as a system service."""
     if supports_systemd_services():
@@ -3424,6 +3466,8 @@ def gateway_setup():
             _setup_feishu()
         elif platform["key"] == "qqbot":
             _setup_qqbot()
+        elif platform["key"] == "msteams":
+            _setup_msteams()
         else:
             _setup_standard_platform(platform)
 

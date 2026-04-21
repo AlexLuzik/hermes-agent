@@ -331,6 +331,30 @@ For cloud sandbox backends, persistence is filesystem-oriented. `TERMINAL_LIFETI
 | `MATRIX_AUTO_THREAD` | Auto-create threads for room messages (default: `true`) |
 | `MATRIX_DM_MENTION_THREADS` | Create a thread when bot is `@mentioned` in a DM (default: `false`) |
 | `MATRIX_RECOVERY_KEY` | Recovery key for cross-signing verification after device key rotation. Recommended for E2EE setups with cross-signing enabled. |
+| `MSTEAMS_APP_ID` | Azure App Registration Application (client) ID. Doubles as the Bot Framework bot id. |
+| `MSTEAMS_TENANT_ID` | Azure Directory (tenant) ID. Use `common` for multi-tenant bots. |
+| `MSTEAMS_AUTH_TYPE` | `secret` (default) or `federated` |
+| `MSTEAMS_APP_PASSWORD` | Client secret when `MSTEAMS_AUTH_TYPE=secret` |
+| `MSTEAMS_CERTIFICATE_PATH` | PEM file containing the private key + X.509 cert when `MSTEAMS_AUTH_TYPE=federated` |
+| `MSTEAMS_CERTIFICATE_THUMBPRINT` | SHA-1 thumbprint registered in Entra ID that matches `MSTEAMS_CERTIFICATE_PATH` |
+| `MSTEAMS_USE_MANAGED_IDENTITY` | `true`/`false`. Use Azure Managed Identity for the Bot Framework + Graph tokens (only works on Azure compute). |
+| `MSTEAMS_MANAGED_IDENTITY_CLIENT_ID` | User-assigned Managed Identity client id. Omit for the system-assigned identity. |
+| `MSTEAMS_HOST` | Webhook bind host (default `0.0.0.0`) |
+| `MSTEAMS_PORT` | Webhook port (default `3978`) |
+| `MSTEAMS_PATH` | Webhook path (default `/api/messages`) |
+| `MSTEAMS_DM_POLICY` | DM access gate: `pairing` (default), `allowlist`, `open`, `disabled` |
+| `MSTEAMS_ALLOWED_USERS` | AAD object ids allowed to DM the bot (alias of `MSTEAMS_ALLOW_FROM`) |
+| `MSTEAMS_ALLOW_ALL_USERS` | `true`/`false`. Bypass the allowlist — intended only for closed-tenant deployments. |
+| `MSTEAMS_ALLOW_FROM` | DM allowlist (comma-separated AAD object ids) |
+| `MSTEAMS_GROUP_ALLOW_FROM` | Channel/group allowlist (comma-separated AAD object ids) |
+| `MSTEAMS_REQUIRE_MENTION` | Require `@mention` in channels/groups (default `true`) |
+| `MSTEAMS_FREE_RESPONSE_CHANNELS` | Comma-separated channel ids that bypass `require_mention` |
+| `MSTEAMS_REPLY_STYLE` | `thread` (Posts UI, default) or `top-level` (Threads UI) |
+| `MSTEAMS_HISTORY_LIMIT` | Messages fetched via Graph for channel context on first turn (default `50`) |
+| `MSTEAMS_SHAREPOINT_SITE_ID` | SharePoint site id used for channel/group file uploads |
+| `MSTEAMS_MEDIA_ALLOW_HOSTS` | Extra hosts allowed for attachment downloads (comma-separated) |
+| `MSTEAMS_HOME_CHANNEL` | Conversation id for cron delivery |
+| `MSTEAMS_HOME_CHANNEL_NAME` | Display name for the Teams home conversation |
 | `HASS_TOKEN` | Home Assistant Long-Lived Access Token (enables HA platform + tools) |
 | `HASS_URL` | Home Assistant URL (default: `http://homeassistant.local:8123`) |
 | `WEBHOOK_ENABLED` | Enable the webhook platform adapter (`true`/`false`) |
