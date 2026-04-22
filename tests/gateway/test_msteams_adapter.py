@@ -735,9 +735,15 @@ class _FakeSession:
         self.calls: List[Dict[str, Any]] = []
         self.closed = False
 
-    def post(self, url, headers=None, json=None):
-        self.calls.append({"url": url, "headers": headers, "json": json})
+    def request(self, method, url, headers=None, json=None):
+        self.calls.append({
+            "method": method, "url": url, "headers": headers, "json": json,
+        })
         return self._response
+
+    # Kept for tests that still exercise the high-level POST surface.
+    def post(self, url, headers=None, json=None):
+        return self.request("POST", url, headers=headers, json=json)
 
     async def close(self):
         self.closed = True
@@ -806,6 +812,54 @@ async def test_send_marks_5xx_retryable(monkeypatch):
     adapter._get_http_session = _get_session
 
     result = await adapter.send("c", "hi")
+    assert result.success is False
+    assert result.retryable is True
+
+
+@pytest.mark.asyncio
+async def test_edit_message_issues_put_to_activity_id():
+    adapter = MsTeamsAdapter(_config())
+    adapter._credential_provider = MagicMock()
+    adapter._credential_provider.get_token = AsyncMock(return_value="tok")
+    adapter._service_urls = {"c": "https://smba.example/amer/"}
+    fake = _FakeSession(_FakeResponse(status=200, payload={"id": "act-1"}))
+
+    async def _get_session():
+        return fake
+
+    adapter._get_http_session = _get_session
+
+    result = await adapter.edit_message("c", "act-1", "**new** body")
+    assert result.success is True
+
+    call = fake.calls[0]
+    assert call["method"] == "PUT"
+    assert call["url"].endswith("/v3/conversations/c/activities/act-1")
+    assert call["json"]["text"] == "<b>new</b> body"
+    assert call["json"]["textFormat"] == "xml"
+    assert call["headers"]["Authorization"] == "Bearer tok"
+
+
+@pytest.mark.asyncio
+async def test_edit_message_without_message_id_fails():
+    adapter = MsTeamsAdapter(_config())
+    adapter._credential_provider = MagicMock()
+    adapter._service_urls = {"c": "https://x/"}
+    result = await adapter.edit_message("c", "", "body")
+    assert result.success is False
+    assert "message_id" in result.error
+
+
+@pytest.mark.asyncio
+async def test_edit_message_marks_5xx_retryable():
+    adapter = MsTeamsAdapter(_config())
+    adapter._credential_provider = MagicMock()
+    adapter._credential_provider.get_token = AsyncMock(return_value="tok")
+    adapter._service_urls = {"c": "https://smba.example/amer/"}
+    fake = _FakeSession(_FakeResponse(status=503, payload={"error": "retry later"}))
+    adapter._get_http_session = AsyncMock(return_value=fake)
+
+    result = await adapter.edit_message("c", "m", "x")
     assert result.success is False
     assert result.retryable is True
 

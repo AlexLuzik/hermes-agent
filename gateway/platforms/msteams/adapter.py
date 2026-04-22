@@ -869,6 +869,41 @@ class MsTeamsAdapter(BasePlatformAdapter):
     async def send_typing(self, chat_id: str, metadata=None) -> None:
         await self._post_activity(chat_id, {"type": "typing"})
 
+    async def edit_message(
+        self,
+        chat_id: str,
+        message_id: str,
+        content: str,
+        *,
+        finalize: bool = False,
+    ) -> SendResult:
+        """Replace the text of an activity Hermes sent earlier.
+
+        Powers streaming UX where the bot posts a placeholder message
+        and keeps editing it with incremental chunks — one visual
+        bubble per agent turn instead of a fragmented wall.  Teams'
+        Bot Framework REST endpoint for this is
+        ``PUT {serviceUrl}/v3/conversations/{chat_id}/activities/{message_id}``.
+
+        ``finalize`` is accepted for parity with
+        :meth:`BasePlatformAdapter.edit_message` but Teams has no
+        separate "streaming done" state — the last edit just wins.
+        """
+        del finalize  # parity placeholder
+        if not message_id:
+            return SendResult(
+                success=False, error="message_id is required for edit",
+                retryable=False,
+            )
+        payload: Dict[str, Any] = {
+            "type": "message",
+            "textFormat": "xml",
+            "text": self.format_message(content),
+        }
+        return await self._post_activity(
+            chat_id, payload, method="PUT", message_id=message_id,
+        )
+
     async def send_image(
         self,
         chat_id: str,
@@ -1127,8 +1162,25 @@ class MsTeamsAdapter(BasePlatformAdapter):
         return data, filename
 
     async def _post_activity(
-        self, chat_id: str, payload: Dict[str, Any],
+        self,
+        chat_id: str,
+        payload: Dict[str, Any],
+        *,
+        method: str = "POST",
+        message_id: Optional[str] = None,
     ) -> SendResult:
+        """Generic Bot Framework REST call.
+
+        - ``method="POST"`` + no ``message_id`` → send a new activity
+          (``/v3/conversations/{chat_id}/activities``).
+        - ``method="PUT"`` + ``message_id`` → edit an activity Hermes
+          previously sent (``/activities/{message_id}``).  Powers
+          :meth:`edit_message` for streaming UX.
+
+        Any other combination is a programmer error and returns a
+        non-retryable failure rather than silently doing the wrong
+        thing.
+        """
         if self._credential_provider is None:
             return SendResult(
                 success=False,
@@ -1152,11 +1204,29 @@ class MsTeamsAdapter(BasePlatformAdapter):
         except AuthError as exc:
             return SendResult(success=False, error=str(exc), retryable=False)
 
-        url = _activities_url(service_url, chat_id)
+        method = method.upper()
+        if method == "POST":
+            url = _activities_url(service_url, chat_id)
+        elif method == "PUT":
+            if not message_id:
+                return SendResult(
+                    success=False,
+                    error="_post_activity PUT requires message_id",
+                    retryable=False,
+                )
+            url = f"{_activities_url(service_url, chat_id)}/{message_id}"
+        else:
+            return SendResult(
+                success=False,
+                error=f"_post_activity: unsupported method {method!r}",
+                retryable=False,
+            )
+
         session = await self._get_http_session()
         import aiohttp
         try:
-            async with session.post(
+            async with session.request(
+                method,
                 url,
                 headers={
                     "Authorization": f"Bearer {token}",

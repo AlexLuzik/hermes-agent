@@ -195,9 +195,15 @@ class _RecordingSession:
         self.response = _FakeResponse()
         self.closed = False
 
-    def post(self, url, headers=None, json=None):
-        self.calls.append({"method": "POST", "url": url, "headers": headers, "json": json})
+    def request(self, method, url, headers=None, json=None, data=None):
+        self.calls.append({
+            "method": method, "url": url,
+            "headers": headers, "json": json, "data": data,
+        })
         return self.response
+
+    def post(self, url, headers=None, json=None):
+        return self.request("POST", url, headers=headers, json=json)
 
     def put(self, url, data=None, headers=None):
         self.calls.append({"method": "PUT", "url": url, "headers": headers, "data": data})
