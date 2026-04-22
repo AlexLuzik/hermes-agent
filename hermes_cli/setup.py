@@ -2044,7 +2044,22 @@ def _setup_msteams():
     if auth_type == "secret":
         secret = prompt("Client secret (Certificates & secrets → Value)", password=True)
         if secret:
-            save_env_value("MSTEAMS_APP_PASSWORD", secret)
+            # Guard against accidental multi-line or whole-paste input —
+            # e.g. copying a block that includes 'Secret ID' + 'Secret Value'.
+            # Azure client secret Values are ~40 chars, always single-line,
+            # no whitespace.  Anything stretching past 72 chars or carrying
+            # whitespace is almost certainly the wrong thing; save only
+            # when it looks reasonable.
+            cleaned = secret.strip()
+            if any(ch.isspace() for ch in cleaned) or len(cleaned) > 72:
+                print_warning(
+                    "That value looks wrong — client secrets are ~40 chars "
+                    "with no whitespace.  Did you paste the Secret ID + "
+                    "Value together?  Skipping save — paste just the "
+                    "'Value' column from Azure Portal next time."
+                )
+            else:
+                save_env_value("MSTEAMS_APP_PASSWORD", cleaned)
     else:
         use_mi = prompt_yes_no(
             "Use Azure Managed Identity (only works on Azure compute)?", False,
