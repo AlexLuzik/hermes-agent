@@ -33,6 +33,7 @@ from gateway.platforms.base import (
     MessageEvent,
     MessageType,
     SendResult,
+    cache_image_from_bytes,
 )
 from gateway.platforms.msteams.auth import (
     BOT_FRAMEWORK_SCOPE,
@@ -401,7 +402,7 @@ class MsTeamsAdapter(BasePlatformAdapter):
             return web.Response(status=200)
 
         try:
-            event, dispatch = self._build_event(activity)
+            event, dispatch = await self._build_event(activity)
         except Exception:
             logger.exception("msteams: failed to build MessageEvent; dropping")
             return web.Response(status=200)
@@ -462,12 +463,14 @@ class MsTeamsAdapter(BasePlatformAdapter):
             logger.warning("msteams: JWT validation failed: %s", exc)
             return False
 
-    def _build_event(self, activity) -> Tuple[Optional[MessageEvent], bool]:
+    async def _build_event(self, activity) -> Tuple[Optional[MessageEvent], bool]:
         """Translate a Teams Activity into a ``(MessageEvent, dispatch)`` pair.
 
         Returns ``(None, False)`` when the message is silently dropped
-        (policy denial, empty text).  Returns ``(event, True)`` when the
-        gateway should dispatch.
+        (policy denial, empty text + no media).  Returns ``(event, True)``
+        when the gateway should dispatch.  Inbound image attachments are
+        downloaded using a fresh Bot Framework bearer token and cached to
+        disk so the agent sees them as ``media_urls``.
         """
         conversation = getattr(activity, "conversation", None)
         if conversation is None:
@@ -539,8 +542,14 @@ class MsTeamsAdapter(BasePlatformAdapter):
             )
             return None, False
 
-        if not cleaned_text:
+        # Inbound attachments — pull images ahead of the text-empty check
+        # so images-only messages still dispatch.
+        media_urls, media_types = await self._extract_image_attachments(activity)
+
+        if not cleaned_text and not media_urls:
             return None, False
+
+        msg_type = MessageType.PHOTO if media_urls else MessageType.TEXT
 
         source = self.build_source(
             chat_id=chat_id,
@@ -554,7 +563,7 @@ class MsTeamsAdapter(BasePlatformAdapter):
 
         event = MessageEvent(
             text=cleaned_text,
-            message_type=MessageType.TEXT,
+            message_type=msg_type,
             source=source,
             raw_message={
                 "service_url": str(getattr(activity, "service_url", "") or ""),
@@ -563,8 +572,88 @@ class MsTeamsAdapter(BasePlatformAdapter):
             },
             message_id=str(getattr(activity, "id", "") or ""),
             reply_to_message_id=reply_to_id,
+            media_urls=media_urls,
+            media_types=media_types,
         )
         return event, True
+
+    async def _extract_image_attachments(
+        self, activity,
+    ) -> Tuple[List[str], List[str]]:
+        """Fetch image bytes for every ``image/*`` attachment on *activity*.
+
+        Returns ``(media_urls, media_types)`` where ``media_urls`` are
+        absolute paths to cached local files.  Failures for one
+        attachment are logged and the rest are still returned.
+
+        Teams hosts images on URLs that require a Bot Framework bearer
+        token.  Channel attachments for message refs go through Graph in
+        a later path; here we handle the DM/inline case the Bot
+        Framework feeds us directly.
+        """
+        attachments = getattr(activity, "attachments", None) or []
+        if not attachments:
+            return [], []
+
+        media_urls: List[str] = []
+        media_types: List[str] = []
+
+        # Prepare auth once — a single token is valid for the lifetime
+        # of this dispatch (~1h).  No token minting for anonymous URLs.
+        bf_token: Optional[str] = None
+        if self._credential_provider is not None:
+            try:
+                bf_token = await self._credential_provider.get_token(BOT_FRAMEWORK_SCOPE)
+            except AuthError as exc:
+                logger.warning("msteams: cannot mint download token: %s", exc)
+
+        session = None
+        for att in attachments:
+            content_type = str(_attr_or_key(att, "content_type") or "").lower()
+            if not content_type.startswith("image/"):
+                continue
+            content_url = str(
+                _attr_or_key(att, "content_url") or _attr_or_key(att, "contentUrl") or ""
+            )
+            if not content_url:
+                continue
+
+            if session is None:
+                session = await self._get_http_session()
+            try:
+                headers = {"Authorization": f"Bearer {bf_token}"} if bf_token else {}
+                async with session.get(content_url, headers=headers) as resp:
+                    if resp.status != 200:
+                        logger.warning(
+                            "msteams: image download %s returned %s",
+                            content_url[:80], resp.status,
+                        )
+                        continue
+                    data = await resp.read()
+            except Exception as exc:
+                logger.warning(
+                    "msteams: image download failed (%s): %s",
+                    content_url[:80], exc,
+                )
+                continue
+
+            # Derive an extension from contentType; cache_image_from_bytes
+            # does its own content sniffing but the extension hints at the
+            # mimetype for downstream tools.
+            ext = "." + content_type.split("/", 1)[1].split(";")[0].strip()
+            if ext not in (".jpg", ".jpeg", ".png", ".gif", ".webp"):
+                ext = ".jpg"
+            try:
+                cached = cache_image_from_bytes(data, ext=ext)
+            except ValueError as exc:
+                # cache_image_from_bytes rejects non-image bytes (often an
+                # HTML error page from Teams if the bearer token was bad).
+                logger.warning("msteams: cache_image rejected: %s", exc)
+                continue
+            media_urls.append(cached)
+            media_types.append(content_type)
+
+        return media_urls, media_types
 
     def _effective_policy(
         self, team_id: Optional[str], channel_id: Optional[str],
@@ -1074,6 +1163,42 @@ class MsTeamsAdapter(BasePlatformAdapter):
             filename=filename,
             content=content,
         )
+
+
+def _attr_or_key(obj, name: str, default=None):
+    """Attribute access that also tolerates dicts.
+
+    Bot Framework SDK sometimes deserialises nested payloads as bare
+    dicts (raw ``channel_data`` blobs, attachment arrays when the
+    schema isn't recognised) instead of typed attribute objects.  This
+    helper copes with either shape without a type check at every call
+    site.
+    """
+    if obj is None:
+        return default
+    if isinstance(obj, dict):
+        if name in obj:
+            return obj[name]
+        # Also try the camelCase sibling for snake_case lookups and
+        # vice-versa — Teams JSON arrives camelCase, the SDK renames to
+        # snake_case, raw dicts stay camelCase.
+        alt = _camel(name) if "_" in name else _snake(name)
+        return obj.get(alt, default)
+    return getattr(obj, name, default)
+
+
+def _camel(s: str) -> str:
+    first, *rest = s.split("_")
+    return first + "".join(w.capitalize() for w in rest)
+
+
+def _snake(s: str) -> str:
+    out: List[str] = []
+    for ch in s:
+        if ch.isupper() and out:
+            out.append("_")
+        out.append(ch.lower())
+    return "".join(out)
 
 
 def _activities_url(service_url: str, chat_id: str) -> str:

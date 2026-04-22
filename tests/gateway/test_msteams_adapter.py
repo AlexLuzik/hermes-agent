@@ -291,9 +291,10 @@ def _activity(**overrides):
     )
 
 
-def test_build_event_dm_accepts():
+@pytest.mark.asyncio
+async def test_build_event_dm_accepts():
     adapter = MsTeamsAdapter(_config(dm_policy="open"))
-    event, dispatch = adapter._build_event(_activity())
+    event, dispatch = await adapter._build_event(_activity())
     assert dispatch is True
     assert event.text == "hello"
     assert event.source.chat_type == "dm"
@@ -301,7 +302,8 @@ def test_build_event_dm_accepts():
     assert event.message_id == "act-1"
 
 
-def test_build_event_channel_requires_mention():
+@pytest.mark.asyncio
+async def test_build_event_channel_requires_mention():
     adapter = MsTeamsAdapter(_config(require_mention=True, bot_display_name="Hermes"))
     activity = _activity(
         conv_id="19:ch@thread.tacv2",
@@ -309,38 +311,169 @@ def test_build_event_channel_requires_mention():
         text="hello without ping",
         channel_data={"team": {"id": "team-1"}, "channel": {"id": "19:ch@thread.tacv2"}},
     )
-    event, dispatch = adapter._build_event(activity)
+    event, dispatch = await adapter._build_event(activity)
     assert dispatch is False
     assert event is None
 
     # With a mention, it goes through and the <at> tag is stripped.
     activity.text = "<at>Hermes</at> please"
-    event, dispatch = adapter._build_event(activity)
+    event, dispatch = await adapter._build_event(activity)
     assert dispatch is True
     assert event.text == "please"
     assert event.source.chat_type == "channel"
     assert event.source.chat_id_alt == "team-1"  # team id captured
 
 
-def test_build_event_group_uses_group_allowlist():
+@pytest.mark.asyncio
+async def test_build_event_group_uses_group_allowlist():
     adapter = MsTeamsAdapter(_config(
         require_mention=False, group_allow_from=["aad-allowed"],
     ))
     activity = _activity(conv_type="groupChat", aad_id="aad-allowed")
-    event, dispatch = adapter._build_event(activity)
+    event, dispatch = await adapter._build_event(activity)
     assert dispatch is True
     assert event.source.chat_type == "group"
 
 
-def test_build_event_empty_text_after_mention_strip_is_dropped():
+@pytest.mark.asyncio
+async def test_build_event_empty_text_after_mention_strip_is_dropped():
     adapter = MsTeamsAdapter(_config(require_mention=True, bot_display_name="Hermes"))
     activity = _activity(
         conv_type="channel",
         text="<at>Hermes</at>",
         channel_data={"team": {"id": "team-1"}, "channel": {"id": "c1"}},
     )
-    event, dispatch = adapter._build_event(activity)
+    event, dispatch = await adapter._build_event(activity)
     assert dispatch is False
+
+
+# ---------------------------------------------------------------------------
+# Inbound image attachments
+# ---------------------------------------------------------------------------
+
+# 1×1 PNG — smallest valid payload that passes cache_image_from_bytes'
+# "looks like an image" sniff.
+_PNG_1x1 = bytes.fromhex(
+    "89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c489"
+    "0000000d49444154785e63f80f0000010001005b3b5a9a0000000049454e44ae426082"
+)
+
+
+@pytest.mark.asyncio
+async def test_build_event_downloads_image_attachment(tmp_path, monkeypatch):
+    adapter = MsTeamsAdapter(_config(dm_policy="open"))
+    adapter._credential_provider = MagicMock()
+    adapter._credential_provider.get_token = AsyncMock(return_value="bf-tok")
+
+    captured = {}
+
+    class _FakeResp:
+        status = 200
+        async def read(self_inner):
+            return _PNG_1x1
+        async def __aenter__(self_inner):
+            return self_inner
+        async def __aexit__(self_inner, *exc):
+            return False
+
+    class _FakeSession:
+        def get(self_inner, url, headers=None):
+            captured["url"] = url
+            captured["headers"] = headers
+            return _FakeResp()
+
+    adapter._get_http_session = AsyncMock(return_value=_FakeSession())
+
+    # Steer cache output into tmp_path so we don't pollute the real cache.
+    from gateway.platforms import base as base_mod
+    monkeypatch.setattr(base_mod, "get_image_cache_dir", lambda: tmp_path)
+
+    activity = _activity(text="look at this")
+    activity.attachments = [
+        SimpleNamespace(content_type="image/png",
+                        content_url="https://smba.example/attachments/img.png"),
+    ]
+
+    event, dispatch = await adapter._build_event(activity)
+    assert dispatch is True
+    assert event.message_type == MessageType.PHOTO
+    assert event.text == "look at this"
+    assert len(event.media_urls) == 1
+    assert event.media_types == ["image/png"]
+
+    # Bearer token from our credential provider made it into the download.
+    assert captured["url"].endswith("/img.png")
+    assert captured["headers"] == {"Authorization": "Bearer bf-tok"}
+
+    # Cached file exists and is the PNG we handed back.
+    cached_path = event.media_urls[0]
+    assert cached_path.endswith(".png")
+
+
+@pytest.mark.asyncio
+async def test_build_event_image_only_still_dispatches(tmp_path, monkeypatch):
+    adapter = MsTeamsAdapter(_config(dm_policy="open"))
+    adapter._credential_provider = MagicMock()
+    adapter._credential_provider.get_token = AsyncMock(return_value="tok")
+
+    class _R:
+        status = 200
+        async def read(self_inner): return _PNG_1x1
+        async def __aenter__(self_inner): return self_inner
+        async def __aexit__(self_inner, *exc): return False
+    class _S:
+        def get(self_inner, url, headers=None): return _R()
+    adapter._get_http_session = AsyncMock(return_value=_S())
+
+    from gateway.platforms import base as base_mod
+    monkeypatch.setattr(base_mod, "get_image_cache_dir", lambda: tmp_path)
+
+    activity = _activity(text="")
+    activity.attachments = [
+        SimpleNamespace(content_type="image/jpeg",
+                        content_url="https://x/a.jpg"),
+    ]
+
+    event, dispatch = await adapter._build_event(activity)
+    assert dispatch is True
+    assert event.message_type == MessageType.PHOTO
+    assert event.text == ""
+    assert len(event.media_urls) == 1
+
+
+@pytest.mark.asyncio
+async def test_build_event_image_download_failure_skips_attachment(
+    tmp_path, monkeypatch,
+):
+    """A 4xx on the attachment URL must not abort the whole dispatch —
+    the text payload should still reach the agent."""
+    adapter = MsTeamsAdapter(_config(dm_policy="open"))
+    adapter._credential_provider = MagicMock()
+    adapter._credential_provider.get_token = AsyncMock(return_value="tok")
+
+    class _R:
+        status = 403
+        async def read(self_inner): return b"forbidden"
+        async def __aenter__(self_inner): return self_inner
+        async def __aexit__(self_inner, *exc): return False
+    class _S:
+        def get(self_inner, url, headers=None): return _R()
+    adapter._get_http_session = AsyncMock(return_value=_S())
+
+    from gateway.platforms import base as base_mod
+    monkeypatch.setattr(base_mod, "get_image_cache_dir", lambda: tmp_path)
+
+    activity = _activity(text="please see the image")
+    activity.attachments = [
+        SimpleNamespace(content_type="image/png",
+                        content_url="https://x/blocked.png"),
+    ]
+
+    event, dispatch = await adapter._build_event(activity)
+    assert dispatch is True
+    assert event.message_type == MessageType.TEXT  # no media reached us
+    assert event.text == "please see the image"
+    assert event.media_urls == []
 
 
 # ---------------------------------------------------------------------------
