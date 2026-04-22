@@ -1,0 +1,49 @@
+# docker-compose for running the FULL Hermes agent (all platforms,
+# Playwright, voice, etc.) with the MS Teams adapter enabled.  Uses the
+# repo's standard Dockerfile which installs [all] and thus pulls in the
+# [msteams] extra.  Expect ~10–15 min on first build because of
+# Playwright + Chromium; rebuilds after source-only changes are fast.
+#
+# Usage:
+#   cp docker/.env.msteams.example docker/.env.msteams
+#   (edit docker/.env.msteams — set MSTEAMS_* and at least one model key)
+#   docker compose -f docker/compose.msteams.yml up --build
+#
+# To expose the Teams webhook publicly for real Bot Framework activities,
+# pair with ngrok / Cloudflare Tunnel pointed at localhost:3978 and put
+# the HTTPS URL into the Bot Framework messaging endpoint.
+
+services:
+  hermes:
+    container_name: hermes
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    image: hermes-agent:full
+    restart: unless-stopped
+    env_file:
+      - .env.msteams
+    environment:
+      # Force the MSTEAMS adapter to bind the externally-published port.
+      MSTEAMS_HOST: "0.0.0.0"
+      MSTEAMS_PORT: "3978"
+      MSTEAMS_PATH: "/api/messages"
+    ports:
+      - "3978:3978"   # MS Teams webhook (Bot Framework → /api/messages)
+      - "8642:8642"   # OpenAI-compatible API server
+      - "8644:8644"   # Generic webhook receiver
+    volumes:
+      - ./hermes-data:/opt/data
+    # Linux hosts don't auto-resolve host.docker.internal; this line
+    # makes `http://host.docker.internal:1234/v1` reach the LM Studio
+    # server running on the host machine.  Harmless on Docker Desktop.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    command: ["gateway"]
+    healthcheck:
+      test: ["CMD", "python3", "-c",
+             "import urllib.request,sys; urllib.request.urlopen('http://127.0.0.1:3978/health', timeout=3); sys.exit(0)"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 60s

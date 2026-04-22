@@ -63,6 +63,10 @@ web/public/ds-assets/
 .release_notes.md
 mini-swe-agent/
 
+# Docker compose state
+docker/.env.msteams
+docker/hermes-data/
+
 # Nix
 .direnv/
 .nix-stamps/
