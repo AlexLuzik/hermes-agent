@@ -29,10 +29,12 @@ from urllib.parse import urlparse
 
 from gateway.config import Platform, PlatformConfig
 from gateway.platforms.base import (
+    SUPPORTED_DOCUMENT_TYPES,
     BasePlatformAdapter,
     MessageEvent,
     MessageType,
     SendResult,
+    cache_document_from_bytes,
     cache_image_from_bytes,
 )
 from gateway.platforms.msteams.auth import (
@@ -542,14 +544,25 @@ class MsTeamsAdapter(BasePlatformAdapter):
             )
             return None, False
 
-        # Inbound attachments — pull images ahead of the text-empty check
-        # so images-only messages still dispatch.
-        media_urls, media_types = await self._extract_image_attachments(activity)
+        # Inbound attachments — pull media ahead of the text-empty check
+        # so media-only messages still dispatch.  `has_image` wins the
+        # message_type classification even when documents are also
+        # attached: the vision pipeline is the more common consumer
+        # and documents ride along as additional media_urls the agent
+        # can still open.
+        media_urls, media_types, has_image = await self._extract_media_attachments(
+            activity,
+        )
 
         if not cleaned_text and not media_urls:
             return None, False
 
-        msg_type = MessageType.PHOTO if media_urls else MessageType.TEXT
+        if has_image:
+            msg_type = MessageType.PHOTO
+        elif media_urls:
+            msg_type = MessageType.DOCUMENT
+        else:
+            msg_type = MessageType.TEXT
 
         source = self.build_source(
             chat_id=chat_id,
@@ -577,49 +590,58 @@ class MsTeamsAdapter(BasePlatformAdapter):
         )
         return event, True
 
-    async def _extract_image_attachments(
+    async def _extract_media_attachments(
         self, activity,
-    ) -> Tuple[List[str], List[str]]:
-        """Download image bytes for every image-like attachment.
+    ) -> Tuple[List[str], List[str], bool]:
+        """Download bytes for every image / document attachment.
 
-        Teams delivers user-attached images in two shapes depending on
+        Teams delivers user-attached files in two shapes depending on
         the client path:
 
         1. ``contentType: "image/<subtype>"`` with a Bot Framework
            channel URL in ``content_url`` — requires a Bearer token on
            the GET (classic Direct Line / emulator shape).
         2. ``contentType: "application/vnd.microsoft.teams.file.download.info"``
-           with ``content.fileType`` = png/jpg/jpeg/gif/webp and a
-           short-lived SharePoint/OneDrive URL in
-           ``content.downloadUrl`` (tempauth baked into the query
-           string — no Authorization header needed, adding one breaks
-           the request).  This is what Teams web/desktop paste-images
-           use today.
+           with ``content.fileType`` naming the extension (png, pdf,
+           docx, xlsx, pptx, zip, txt, md, log, …) and a short-lived
+           SharePoint/OneDrive URL in ``content.downloadUrl`` (tempauth
+           in the query string — Authorization header must be
+           *omitted*, it breaks tempauth).  This is what Teams
+           web/desktop paste / drag-drop uploads use today.
+
+        Image extensions land in the image cache; other supported
+        document extensions land in the document cache — both paths
+        produce absolute file paths the agent can open.
 
         When the direct GET fails (403 / 410 / expired tempauth) AND
         the activity carries enough context to address the attachment
         through Graph (team + channel + message ids + a hostedContent
         id extracted from the URL), the adapter falls back to
-        :meth:`GraphClient.download_hosted_content` so a tenant that
-        restricts anonymous hosted-content access still produces bytes
-        for the vision pipeline.
+        :meth:`GraphClient.download_hosted_content`.
 
-        Returns ``(media_urls, media_types)`` where ``media_urls`` are
-        absolute paths to cached local files.  Failures for one
-        attachment are logged and the rest are still returned.
+        Returns ``(media_urls, media_types, has_image)``.  ``has_image``
+        lets the caller classify the event as PHOTO over DOCUMENT when
+        a user sent both — vision is the more common pipeline.
         """
         attachments = getattr(activity, "attachments", None) or []
         if not attachments:
-            return [], []
+            return [], [], False
 
         _IMAGE_EXTS = {"png", "jpg", "jpeg", "gif", "webp"}
         _EXT_TO_MIME = {
             "png": "image/png", "jpg": "image/jpeg", "jpeg": "image/jpeg",
             "gif": "image/gif", "webp": "image/webp",
         }
+        # Document extensions are exactly what the rest of Hermes caches —
+        # same set as SUPPORTED_DOCUMENT_TYPES so the downstream tools see
+        # a familiar layout.
+        _DOC_EXT_TO_MIME = {
+            ext.lstrip("."): mime for ext, mime in SUPPORTED_DOCUMENT_TYPES.items()
+        }
 
         media_urls: List[str] = []
         media_types: List[str] = []
+        has_image = False
 
         # Context needed for Graph fallback — parsed once per activity.
         channel_data = getattr(activity, "channel_data", None) or {}
@@ -650,7 +672,9 @@ class MsTeamsAdapter(BasePlatformAdapter):
             download_url = ""
             mimetype = ""
             ext = ""
+            filename = str(_attr_or_key(att, "name") or "").strip()
             needs_bearer = False
+            kind: str = ""  # "image" | "document"
 
             if content_type.startswith("image/"):
                 # Shape 1 — classic image attachment.
@@ -663,26 +687,38 @@ class MsTeamsAdapter(BasePlatformAdapter):
                 raw_ext = content_type.split("/", 1)[1].split(";")[0].strip()
                 ext = "." + (raw_ext if raw_ext in _IMAGE_EXTS else "jpg")
                 needs_bearer = True
+                kind = "image"
 
             elif content_type == "application/vnd.microsoft.teams.file.download.info":
-                # Shape 2 — Teams file upload.  Only pull it through the
-                # image path when the underlying file is actually an
-                # image; leave PDFs, DOCX, etc. to the agent's file
-                # tooling.
+                # Shape 2 — Teams file upload.  Supports both images and
+                # documents (PDF, DOCX, XLSX, PPTX, ZIP, TXT, …).  The
+                # fileType tells us how to cache it.
                 content_block = _attr_or_key(att, "content") or {}
                 file_type = str(_attr_or_key(content_block, "file_type")
                                 or _attr_or_key(content_block, "fileType")
-                                or "").lower()
-                if file_type not in _IMAGE_EXTS:
-                    continue
+                                or "").lower().lstrip(".")
                 download_url = str(
                     _attr_or_key(content_block, "download_url")
                     or _attr_or_key(content_block, "downloadUrl")
                     or ""
                 )
-                mimetype = _EXT_TO_MIME[file_type]
-                ext = "." + file_type
                 needs_bearer = False  # tempauth in query string
+
+                if file_type in _IMAGE_EXTS:
+                    mimetype = _EXT_TO_MIME[file_type]
+                    ext = "." + file_type
+                    kind = "image"
+                elif file_type in _DOC_EXT_TO_MIME:
+                    mimetype = _DOC_EXT_TO_MIME[file_type]
+                    ext = "." + file_type
+                    kind = "document"
+                else:
+                    logger.info(
+                        "msteams: dropping unsupported file.download.info "
+                        "attachment (fileType=%r, name=%r)",
+                        file_type, filename,
+                    )
+                    continue
 
             else:
                 continue
@@ -742,14 +778,23 @@ class MsTeamsAdapter(BasePlatformAdapter):
                 continue
 
             try:
-                cached = cache_image_from_bytes(data, ext=ext)
+                if kind == "image":
+                    cached = cache_image_from_bytes(data, ext=ext)
+                    has_image = True
+                else:
+                    # Preserve the human-readable filename for documents
+                    # so the agent can surface it in tool responses.
+                    target_name = filename or f"attachment{ext}"
+                    cached = cache_document_from_bytes(data, target_name)
             except ValueError as exc:
-                logger.warning("msteams: cache_image rejected: %s", exc)
+                logger.warning(
+                    "msteams: cache rejected (%s): %s", kind, exc,
+                )
                 continue
             media_urls.append(cached)
             media_types.append(mimetype)
 
-        return media_urls, media_types
+        return media_urls, media_types, has_image
 
     def _effective_policy(
         self, team_id: Optional[str], channel_id: Optional[str],

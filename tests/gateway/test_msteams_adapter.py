@@ -495,29 +495,177 @@ async def test_build_event_downloads_teams_file_download_info_image(
 
 
 @pytest.mark.asyncio
-async def test_build_event_skips_non_image_file_download_info(
-    tmp_path, monkeypatch,
-):
-    """A PDF upload comes as file.download.info too — don't route
-    it through the image pipeline."""
+async def test_build_event_downloads_pdf_as_document(tmp_path, monkeypatch):
+    """A PDF comes as file.download.info with fileType=pdf — it must be
+    cached via cache_document_from_bytes and dispatched as DOCUMENT so
+    the agent can open it via its file-read tools."""
     adapter = MsTeamsAdapter(_config(dm_policy="open"))
     adapter._credential_provider = MagicMock()
     adapter._credential_provider.get_token = AsyncMock(return_value="tok")
 
+    _PDF_BYTES = b"%PDF-1.4\n%hermes-test\n"
+
+    class _R:
+        status = 200
+        async def read(self_inner): return _PDF_BYTES
+        async def __aenter__(self_inner): return self_inner
+        async def __aexit__(self_inner, *exc): return False
+    class _S:
+        def get(self_inner, url, headers=None): return _R()
+    adapter._get_http_session = AsyncMock(return_value=_S())
+
     from gateway.platforms import base as base_mod
-    monkeypatch.setattr(base_mod, "get_image_cache_dir", lambda: tmp_path)
+    monkeypatch.setattr(base_mod, "DOCUMENT_CACHE_DIR", tmp_path)
+    monkeypatch.setattr(base_mod, "get_document_cache_dir", lambda: tmp_path)
 
     activity = _activity(text="see attached")
     activity.attachments = [
         SimpleNamespace(
             content_type="application/vnd.microsoft.teams.file.download.info",
             content_url="https://sp.example/doc.pdf",
-            name="doc.pdf",
+            name="report.pdf",
             content={
-                "downloadUrl": "https://sp.example/download.aspx?...",
+                "downloadUrl": "https://sp.example/download.aspx?tempauth=v1",
                 "uniqueId": "u",
                 "fileType": "pdf",
             },
+        ),
+    ]
+
+    event, dispatch = await adapter._build_event(activity)
+    assert dispatch is True
+    assert event.message_type == MessageType.DOCUMENT
+    assert event.media_types == ["application/pdf"]
+    assert len(event.media_urls) == 1
+    cached = event.media_urls[0]
+    assert cached.endswith("report.pdf")
+
+
+@pytest.mark.asyncio
+async def test_build_event_handles_zip_and_office_docs(tmp_path, monkeypatch):
+    """ZIP, DOCX, XLSX, PPTX, TXT, MD — everything Hermes' document
+    cache already knows about — must route through the document path
+    with the right mimetype."""
+    adapter = MsTeamsAdapter(_config(dm_policy="open"))
+    adapter._credential_provider = MagicMock()
+    adapter._credential_provider.get_token = AsyncMock(return_value="tok")
+
+    class _R:
+        status = 200
+        async def read(self_inner): return b"fake-document-bytes"
+        async def __aenter__(self_inner): return self_inner
+        async def __aexit__(self_inner, *exc): return False
+    class _S:
+        def get(self_inner, url, headers=None): return _R()
+    adapter._get_http_session = AsyncMock(return_value=_S())
+
+    from gateway.platforms import base as base_mod
+    monkeypatch.setattr(base_mod, "DOCUMENT_CACHE_DIR", tmp_path)
+    monkeypatch.setattr(base_mod, "get_document_cache_dir", lambda: tmp_path)
+
+    shapes = [
+        ("zip", "application/zip"),
+        ("txt", "text/plain"),
+        ("docx",
+         "application/vnd.openxmlformats-officedocument.wordprocessingml.document"),
+        ("xlsx",
+         "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"),
+        ("pptx",
+         "application/vnd.openxmlformats-officedocument.presentationml.presentation"),
+    ]
+    activity = _activity(text="batch")
+    activity.attachments = [
+        SimpleNamespace(
+            content_type="application/vnd.microsoft.teams.file.download.info",
+            content_url=f"https://sp.example/a.{ext}",
+            name=f"file.{ext}",
+            content={
+                "downloadUrl": f"https://sp.example/download.aspx?tempauth=v1&e={ext}",
+                "uniqueId": ext,
+                "fileType": ext,
+            },
+        )
+        for ext, _mime in shapes
+    ]
+
+    event, dispatch = await adapter._build_event(activity)
+    assert dispatch is True
+    assert event.message_type == MessageType.DOCUMENT
+    assert len(event.media_urls) == len(shapes)
+    assert event.media_types == [mime for _ext, mime in shapes]
+
+
+@pytest.mark.asyncio
+async def test_build_event_mixed_image_and_document_classifies_as_photo(
+    tmp_path, monkeypatch,
+):
+    """An activity carrying both an image and a PDF should still be
+    PHOTO (vision is the more common pipeline) but expose the PDF as
+    an extra media_url so the agent can reach it from tool calls."""
+    adapter = MsTeamsAdapter(_config(dm_policy="open"))
+    adapter._credential_provider = MagicMock()
+    adapter._credential_provider.get_token = AsyncMock(return_value="tok")
+
+    class _R:
+        def __init__(self_inner, payload): self_inner._payload = payload
+        status = 200
+        async def read(self_inner): return self_inner._payload
+        async def __aenter__(self_inner): return self_inner
+        async def __aexit__(self_inner, *exc): return False
+
+    def _router(url, headers=None):
+        return _R(_PNG_1x1 if "png" in url else b"%PDF-1.4\n")
+    class _S:
+        def get(self_inner, url, headers=None): return _router(url, headers)
+    adapter._get_http_session = AsyncMock(return_value=_S())
+
+    from gateway.platforms import base as base_mod
+    monkeypatch.setattr(base_mod, "get_image_cache_dir", lambda: tmp_path)
+    monkeypatch.setattr(base_mod, "DOCUMENT_CACHE_DIR", tmp_path)
+    monkeypatch.setattr(base_mod, "get_document_cache_dir", lambda: tmp_path)
+
+    activity = _activity(text="see both")
+    activity.attachments = [
+        SimpleNamespace(
+            content_type="application/vnd.microsoft.teams.file.download.info",
+            content_url="https://sp.example/a.pdf",
+            name="notes.pdf",
+            content={"downloadUrl": "https://sp.example/a.pdf?t=v1",
+                     "fileType": "pdf", "uniqueId": "p"},
+        ),
+        SimpleNamespace(
+            content_type="application/vnd.microsoft.teams.file.download.info",
+            content_url="https://sp.example/b.png",
+            name="chart.png",
+            content={"downloadUrl": "https://sp.example/b.png?t=v1",
+                     "fileType": "png", "uniqueId": "i"},
+        ),
+    ]
+
+    event, dispatch = await adapter._build_event(activity)
+    assert dispatch is True
+    assert event.message_type == MessageType.PHOTO
+    assert set(event.media_types) == {"application/pdf", "image/png"}
+    assert len(event.media_urls) == 2
+
+
+@pytest.mark.asyncio
+async def test_build_event_drops_unknown_file_type(tmp_path, monkeypatch):
+    """An .exe (or any extension not in SUPPORTED_DOCUMENT_TYPES) is
+    dropped silently with a log line — don't silently cache
+    arbitrary binaries."""
+    adapter = MsTeamsAdapter(_config(dm_policy="open"))
+    adapter._credential_provider = MagicMock()
+    adapter._credential_provider.get_token = AsyncMock(return_value="tok")
+
+    activity = _activity(text="blocked")
+    activity.attachments = [
+        SimpleNamespace(
+            content_type="application/vnd.microsoft.teams.file.download.info",
+            content_url="https://sp.example/bad.exe",
+            name="payload.exe",
+            content={"downloadUrl": "https://sp.example/download?...",
+                     "fileType": "exe", "uniqueId": "e"},
         ),
     ]
 
