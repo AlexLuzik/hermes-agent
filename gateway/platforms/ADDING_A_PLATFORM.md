@@ -140,6 +140,23 @@ inappropriate formatting (e.g., markdown on platforms that don't render it).
 
 ---
 
+## 6b. Platform Registry (`hermes_cli/platforms.py`)
+
+Add an entry to the `PLATFORMS` `OrderedDict` mapping your platform key
+to its default toolset:
+
+```python
+("your_platform", PlatformInfo(label="📱 Your Platform",
+                               default_toolset="hermes-your-platform")),
+```
+
+Without this the gateway crashes with `KeyError: 'your_platform'` the
+first time it tries to resolve the platform's default toolset in
+`hermes_cli/tools_config._get_platform_tools` — which happens on every
+inbound message.  Keep the key in sync with `Platform` enum values.
+
+---
+
 ## 7. Toolset (`toolsets.py`)
 
 Add a named toolset for your platform:

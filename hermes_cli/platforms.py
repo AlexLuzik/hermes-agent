@@ -30,6 +30,7 @@ PLATFORMS: OrderedDict[str, PlatformInfo] = OrderedDict([
     ("homeassistant",  PlatformInfo(label="🏠 Home Assistant",  default_toolset="hermes-homeassistant")),
     ("mattermost",     PlatformInfo(label="💬 Mattermost",      default_toolset="hermes-mattermost")),
     ("matrix",         PlatformInfo(label="💬 Matrix",          default_toolset="hermes-matrix")),
+    ("msteams",        PlatformInfo(label="🪟 MS Teams",        default_toolset="hermes-msteams")),
     ("dingtalk",       PlatformInfo(label="💬 DingTalk",        default_toolset="hermes-dingtalk")),
     ("feishu",         PlatformInfo(label="🪽 Feishu",          default_toolset="hermes-feishu")),
     ("wecom",          PlatformInfo(label="💬 WeCom",           default_toolset="hermes-wecom")),
