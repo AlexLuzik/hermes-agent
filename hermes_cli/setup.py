@@ -3156,6 +3156,46 @@ def _resolve_hermes_chat_argv() -> Optional[list[str]]:
     return None
 
 
+def _print_container_restart_hint(*, gateway_configured: bool) -> None:
+    """Remind Docker / Podman users to restart the container.
+
+    Systemd / launchd integration in the wizard (``setup_gateway`` near
+    the "Restart the gateway to pick up changes?" prompt) can't reach
+    pid 1 of a container from inside it, so the main gateway process
+    keeps running with its original ``os.environ`` snapshot — meaning
+    the credentials the wizard just wrote to ``$HERMES_HOME/.env`` are
+    *not* picked up until the container restarts.  Surface a single
+    actionable line so the user isn't left wondering why their bot
+    silently refuses to respond.
+    """
+    try:
+        from hermes_constants import is_container
+    except Exception:
+        return
+    if not is_container():
+        return
+    if not gateway_configured:
+        return
+
+    # Best-effort container id for a copy-pasteable command.  Linux
+    # container runtimes expose the short id as the hostname; on the
+    # rare host where that isn't true, the user falls back to looking
+    # up the name manually.
+    import socket as _socket
+    container_hint = _socket.gethostname() or "<container>"
+
+    print()
+    print_info("🐳 Running inside a container — systemd/launchd don't apply.")
+    print_info(
+        "   The gateway process still has the old environment; restart the "
+        "container to pick up the new platform credentials:"
+    )
+    print()
+    print_info(f"     docker restart {container_hint}")
+    print_info(f"     # or:  podman restart {container_hint}")
+    print()
+
+
 def _offer_launch_chat():
     """Prompt the user to jump straight into chat after setup."""
     print()
@@ -3210,6 +3250,8 @@ def _run_first_time_quick_setup(config: dict, hermes_home, is_existing: bool):
     print()
 
     _print_setup_summary(config, hermes_home)
+
+    _print_container_restart_hint(gateway_configured=gateway_choice == 0)
 
     _offer_launch_chat()
 
