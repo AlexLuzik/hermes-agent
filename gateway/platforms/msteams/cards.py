@@ -150,6 +150,60 @@ def build_adaptive_card(
     }
 
 
+def build_poll_card(
+    question: str,
+    options: List[str],
+    *,
+    is_multi_select: bool = False,
+    submit_title: str = "Vote",
+    submit_data: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """Build an Adaptive Card poll attachment.
+
+    A poll is a thin convention on top of Adaptive Cards — a bold
+    question ``TextBlock`` followed by an ``Input.ChoiceSet`` and a
+    single ``Action.Submit``.  Teams returns the user's choice as an
+    ``invoke`` activity with ``value = {"choice": "<value>", **submit_data}``
+    (or a list when ``is_multi_select=True``); the adapter dispatches
+    those through the same path as any other card-action invoke.
+
+    Two design nits worth calling out:
+    - choice values equal the visible titles.  If you need opaque
+      identifiers (e.g. for a ballot-secrecy use case), build the
+      Adaptive Card by hand with :func:`build_adaptive_card` instead.
+    - ``style`` is always ``"expanded"`` so voters see every option
+      without tapping the combobox — the typical UX for a one-shot
+      poll.
+    """
+    if not options:
+        raise ValueError("build_poll_card requires at least one option")
+
+    choices = [{"title": opt, "value": opt} for opt in options]
+    body: List[Dict[str, Any]] = [
+        {
+            "type": "TextBlock",
+            "text": question,
+            "weight": "Bolder",
+            "wrap": True,
+        },
+        {
+            "type": "Input.ChoiceSet",
+            "id": "choice",
+            "style": "expanded",
+            "isMultiSelect": bool(is_multi_select),
+            "choices": choices,
+        },
+    ]
+    actions: List[Dict[str, Any]] = [
+        {
+            "type": "Action.Submit",
+            "title": submit_title,
+            "data": dict(submit_data or {}),
+        },
+    ]
+    return build_adaptive_card(body=body, actions=actions)
+
+
 # ---------------------------------------------------------------------------
 # FileConsentCard — DM-only upload consent flow
 # ---------------------------------------------------------------------------

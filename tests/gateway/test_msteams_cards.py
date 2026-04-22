@@ -23,6 +23,7 @@ from gateway.platforms.msteams.cards import (
     build_file_consent_card,
     build_file_download_card,
     build_file_info_card,
+    build_poll_card,
     markdown_to_teams_html,
 )
 
@@ -46,6 +47,54 @@ def test_adaptive_card_wraps_body():
 def test_adaptive_card_omits_actions_key_when_empty():
     card = build_adaptive_card(body=[{"type": "TextBlock", "text": "x"}])
     assert "actions" not in card["content"]
+
+
+# ---------------------------------------------------------------------------
+# Poll card
+# ---------------------------------------------------------------------------
+
+def test_poll_card_single_select_shape():
+    card = build_poll_card(
+        question="Best coffee?",
+        options=["Latte", "Espresso", "Cortado"],
+    )
+    assert card["contentType"] == ADAPTIVE_CARD_CONTENT_TYPE
+    body = card["content"]["body"]
+    assert body[0] == {
+        "type": "TextBlock", "text": "Best coffee?",
+        "weight": "Bolder", "wrap": True,
+    }
+    choice_set = body[1]
+    assert choice_set["type"] == "Input.ChoiceSet"
+    assert choice_set["id"] == "choice"
+    assert choice_set["style"] == "expanded"
+    assert choice_set["isMultiSelect"] is False
+    assert [c["value"] for c in choice_set["choices"]] == [
+        "Latte", "Espresso", "Cortado",
+    ]
+    actions = card["content"]["actions"]
+    assert actions[0]["type"] == "Action.Submit"
+    assert actions[0]["title"] == "Vote"
+
+
+def test_poll_card_multi_select_and_submit_data():
+    card = build_poll_card(
+        question="Pick toppings",
+        options=["Pepperoni", "Mushrooms"],
+        is_multi_select=True,
+        submit_title="Order",
+        submit_data={"poll_id": "p-42"},
+    )
+    body = card["content"]["body"]
+    assert body[1]["isMultiSelect"] is True
+    actions = card["content"]["actions"]
+    assert actions[0]["title"] == "Order"
+    assert actions[0]["data"] == {"poll_id": "p-42"}
+
+
+def test_poll_card_empty_options_raises():
+    with pytest.raises(ValueError, match="at least one option"):
+        build_poll_card(question="?", options=[])
 
 
 # ---------------------------------------------------------------------------
