@@ -1997,6 +1997,89 @@ def _setup_mattermost():
         save_env_value("MATTERMOST_HOME_CHANNEL", home_channel)
 
 
+def _setup_msteams():
+    """Configure Microsoft Teams bot credentials.
+
+    MS Teams supports two auth flows.  The simple one is a client secret
+    from Azure Portal → Certificates & secrets; federated auth uses a
+    certificate registered in Entra ID or Azure Managed Identity (which
+    only works on Azure compute — App Service, AKS, Container Apps).
+    """
+    print_header("Microsoft Teams")
+    existing = get_env_value("MSTEAMS_APP_ID")
+    if existing:
+        print_info("Microsoft Teams: already configured")
+        if not prompt_yes_no("Reconfigure Microsoft Teams?", False):
+            return
+
+    print_info("Setup outline (see the MS Teams page of the docs for screenshots):")
+    print_info("   1. Azure Portal → App registrations → New registration.")
+    print_info("      Copy the Application (client) ID and Directory (tenant) ID.")
+    print_info("   2. Either create a client secret (Certificates & secrets) OR")
+    print_info("      upload a certificate / set up Managed Identity.")
+    print_info("   3. https://dev.botframework.com/bots → Create a Bot and paste")
+    print_info("      the Application (client) ID from step 1.")
+    print_info("   4. Set the Bot messaging endpoint to")
+    print_info("      https://<public-host>:3978/api/messages  (ngrok/Cloudflare)")
+    print_info("   5. Upload a Teams manifest (same App ID) via Teams Admin Center.")
+    print()
+
+    app_id = prompt("Application (client) ID")
+    if not app_id:
+        return
+    save_env_value("MSTEAMS_APP_ID", app_id.strip())
+
+    tenant_id = prompt("Directory (tenant) ID (or 'common' for multi-tenant)")
+    if tenant_id:
+        save_env_value("MSTEAMS_TENANT_ID", tenant_id.strip())
+
+    auth_choice = prompt(
+        "Auth type — 'secret' (client secret) or 'federated' (certificate/MI) [secret]"
+    )
+    auth_type = (auth_choice or "secret").strip().lower()
+    if auth_type not in {"secret", "federated"}:
+        auth_type = "secret"
+    save_env_value("MSTEAMS_AUTH_TYPE", auth_type)
+
+    if auth_type == "secret":
+        secret = prompt("Client secret (Certificates & secrets → Value)", password=True)
+        if secret:
+            save_env_value("MSTEAMS_APP_PASSWORD", secret)
+    else:
+        use_mi = prompt_yes_no(
+            "Use Azure Managed Identity (only works on Azure compute)?", False,
+        )
+        if use_mi:
+            save_env_value("MSTEAMS_USE_MANAGED_IDENTITY", "true")
+            mi_id = prompt("Managed Identity client ID (blank = system-assigned)")
+            if mi_id:
+                save_env_value("MSTEAMS_MANAGED_IDENTITY_CLIENT_ID", mi_id.strip())
+        else:
+            cert_path = prompt("Path to PEM file with private key + certificate")
+            if cert_path:
+                save_env_value("MSTEAMS_CERTIFICATE_PATH", cert_path.strip())
+            cert_thumb = prompt("Certificate thumbprint (SHA-1, registered in Entra ID)")
+            if cert_thumb:
+                save_env_value("MSTEAMS_CERTIFICATE_THUMBPRINT", cert_thumb.strip())
+
+    print()
+    print_info("🔒 Security: Restrict who can reach the bot")
+    print_info("   Use AAD Object IDs (Azure AD → Users → profile → Object ID).")
+    print()
+    allowed = prompt("Allowed AAD Object IDs (comma-separated, empty to skip)")
+    if allowed:
+        save_env_value("MSTEAMS_ALLOWED_USERS", allowed.replace(" ", ""))
+        print_success("Teams allowlist configured")
+    else:
+        print_info("⚠️  No allowlist — bot uses pairing flow for unknown senders.")
+
+    print()
+    print_info("📬 Home conversation: where Hermes delivers cron job results.")
+    home = prompt("Home conversation ID (optional)")
+    if home:
+        save_env_value("MSTEAMS_HOME_CHANNEL", home.strip())
+
+
 def _setup_whatsapp():
     """Configure WhatsApp bridge."""
     print_header("WhatsApp")
@@ -2192,6 +2275,7 @@ _GATEWAY_PLATFORMS = [
     ("SMS (Twilio)", "TWILIO_ACCOUNT_SID", _setup_sms),
     ("Matrix", "MATRIX_ACCESS_TOKEN", _setup_matrix),
     ("Mattermost", "MATTERMOST_TOKEN", _setup_mattermost),
+    ("Microsoft Teams", "MSTEAMS_APP_ID", _setup_msteams),
     ("WhatsApp", "WHATSAPP_ENABLED", _setup_whatsapp),
     ("DingTalk", "DINGTALK_CLIENT_ID", _setup_dingtalk),
     ("Feishu / Lark", "FEISHU_APP_ID", _setup_feishu),

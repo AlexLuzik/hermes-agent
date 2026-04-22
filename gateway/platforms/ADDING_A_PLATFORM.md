@@ -256,6 +256,13 @@ in the platform selection switch.
 Update `_platform_status()` if your platform's "configured" check differs
 from the standard `bool(get_env_value(token_var))`.
 
+**Also** add an entry to `_GATEWAY_PLATFORMS` in `hermes_cli/setup.py`
+and define a matching `_setup_<platform>()` there — that's the checklist
+the top-level `hermes setup` wizard shows.  The two lists serve
+different callers (`hermes gateway` vs `hermes setup`) and both need
+updating; otherwise the platform silently disappears from one of the
+wizards.
+
 ---
 
 ## 14. Phone/ID Redaction (`agent/redact.py`)
