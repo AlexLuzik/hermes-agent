@@ -580,26 +580,43 @@ class MsTeamsAdapter(BasePlatformAdapter):
     async def _extract_image_attachments(
         self, activity,
     ) -> Tuple[List[str], List[str]]:
-        """Fetch image bytes for every ``image/*`` attachment on *activity*.
+        """Download image bytes for every image-like attachment.
+
+        Teams delivers user-attached images in two shapes depending on
+        the client path:
+
+        1. ``contentType: "image/<subtype>"`` with a Bot Framework
+           channel URL in ``content_url`` — requires a Bearer token on
+           the GET (classic Direct Line / emulator shape).
+        2. ``contentType: "application/vnd.microsoft.teams.file.download.info"``
+           with ``content.fileType`` = png/jpg/jpeg/gif/webp and a
+           short-lived SharePoint/OneDrive URL in
+           ``content.downloadUrl`` (tempauth baked into the query
+           string — no Authorization header needed, adding one breaks
+           the request).  This is what Teams web/desktop paste-images
+           use today.
 
         Returns ``(media_urls, media_types)`` where ``media_urls`` are
         absolute paths to cached local files.  Failures for one
         attachment are logged and the rest are still returned.
-
-        Teams hosts images on URLs that require a Bot Framework bearer
-        token.  Channel attachments for message refs go through Graph in
-        a later path; here we handle the DM/inline case the Bot
-        Framework feeds us directly.
         """
         attachments = getattr(activity, "attachments", None) or []
         if not attachments:
             return [], []
 
+        _IMAGE_EXTS = {"png", "jpg", "jpeg", "gif", "webp"}
+        _EXT_TO_MIME = {
+            "png": "image/png", "jpg": "image/jpeg", "jpeg": "image/jpeg",
+            "gif": "image/gif", "webp": "image/webp",
+        }
+
         media_urls: List[str] = []
         media_types: List[str] = []
 
-        # Prepare auth once — a single token is valid for the lifetime
-        # of this dispatch (~1h).  No token minting for anonymous URLs.
+        # Mint the Bot Framework bearer once — reused for every image/*
+        # download in this activity.  The SharePoint download.info path
+        # intentionally skips the header because tempauth URLs reject
+        # extra Authorization headers with 401.
         bf_token: Optional[str] = None
         if self._credential_provider is not None:
             try:
@@ -608,50 +625,82 @@ class MsTeamsAdapter(BasePlatformAdapter):
                 logger.warning("msteams: cannot mint download token: %s", exc)
 
         session = None
+
         for att in attachments:
             content_type = str(_attr_or_key(att, "content_type") or "").lower()
-            if not content_type.startswith("image/"):
+            download_url = ""
+            mimetype = ""
+            ext = ""
+            needs_bearer = False
+
+            if content_type.startswith("image/"):
+                # Shape 1 — classic image attachment.
+                download_url = str(
+                    _attr_or_key(att, "content_url")
+                    or _attr_or_key(att, "contentUrl")
+                    or ""
+                )
+                mimetype = content_type
+                raw_ext = content_type.split("/", 1)[1].split(";")[0].strip()
+                ext = "." + (raw_ext if raw_ext in _IMAGE_EXTS else "jpg")
+                needs_bearer = True
+
+            elif content_type == "application/vnd.microsoft.teams.file.download.info":
+                # Shape 2 — Teams file upload.  Only pull it through the
+                # image path when the underlying file is actually an
+                # image; leave PDFs, DOCX, etc. to the agent's file
+                # tooling.
+                content_block = _attr_or_key(att, "content") or {}
+                file_type = str(_attr_or_key(content_block, "file_type")
+                                or _attr_or_key(content_block, "fileType")
+                                or "").lower()
+                if file_type not in _IMAGE_EXTS:
+                    continue
+                download_url = str(
+                    _attr_or_key(content_block, "download_url")
+                    or _attr_or_key(content_block, "downloadUrl")
+                    or ""
+                )
+                mimetype = _EXT_TO_MIME[file_type]
+                ext = "." + file_type
+                needs_bearer = False  # tempauth in query string
+
+            else:
                 continue
-            content_url = str(
-                _attr_or_key(att, "content_url") or _attr_or_key(att, "contentUrl") or ""
-            )
-            if not content_url:
+
+            if not download_url:
                 continue
 
             if session is None:
                 session = await self._get_http_session()
+            headers = (
+                {"Authorization": f"Bearer {bf_token}"}
+                if needs_bearer and bf_token
+                else {}
+            )
             try:
-                headers = {"Authorization": f"Bearer {bf_token}"} if bf_token else {}
-                async with session.get(content_url, headers=headers) as resp:
+                async with session.get(download_url, headers=headers) as resp:
                     if resp.status != 200:
                         logger.warning(
                             "msteams: image download %s returned %s",
-                            content_url[:80], resp.status,
+                            download_url[:80], resp.status,
                         )
                         continue
                     data = await resp.read()
             except Exception as exc:
                 logger.warning(
                     "msteams: image download failed (%s): %s",
-                    content_url[:80], exc,
+                    download_url[:80], exc,
                 )
                 continue
 
-            # Derive an extension from contentType; cache_image_from_bytes
-            # does its own content sniffing but the extension hints at the
-            # mimetype for downstream tools.
-            ext = "." + content_type.split("/", 1)[1].split(";")[0].strip()
-            if ext not in (".jpg", ".jpeg", ".png", ".gif", ".webp"):
-                ext = ".jpg"
             try:
                 cached = cache_image_from_bytes(data, ext=ext)
             except ValueError as exc:
-                # cache_image_from_bytes rejects non-image bytes (often an
-                # HTML error page from Teams if the bearer token was bad).
                 logger.warning("msteams: cache_image rejected: %s", exc)
                 continue
             media_urls.append(cached)
-            media_types.append(content_type)
+            media_types.append(mimetype)
 
         return media_urls, media_types
 

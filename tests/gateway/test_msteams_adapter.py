@@ -442,6 +442,92 @@ async def test_build_event_image_only_still_dispatches(tmp_path, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_build_event_downloads_teams_file_download_info_image(
+    tmp_path, monkeypatch,
+):
+    """Teams web/desktop deliver pasted images as
+    application/vnd.microsoft.teams.file.download.info with a SharePoint
+    tempauth URL.  These must be pulled WITHOUT a Bearer header — adding
+    one breaks the tempauth flow."""
+    adapter = MsTeamsAdapter(_config(dm_policy="open"))
+    adapter._credential_provider = MagicMock()
+    adapter._credential_provider.get_token = AsyncMock(return_value="bf-tok")
+
+    captured = {}
+
+    class _R:
+        status = 200
+        async def read(self_inner): return _PNG_1x1
+        async def __aenter__(self_inner): return self_inner
+        async def __aexit__(self_inner, *exc): return False
+    class _S:
+        def get(self_inner, url, headers=None):
+            captured["url"] = url
+            captured["headers"] = dict(headers or {})
+            return _R()
+    adapter._get_http_session = AsyncMock(return_value=_S())
+
+    from gateway.platforms import base as base_mod
+    monkeypatch.setattr(base_mod, "get_image_cache_dir", lambda: tmp_path)
+
+    activity = _activity(text="а тут что?")
+    activity.attachments = [
+        SimpleNamespace(
+            content_type="application/vnd.microsoft.teams.file.download.info",
+            content_url="https://sp.example/Documents/2.png",
+            name="2.png",
+            content={
+                "downloadUrl": "https://sp.example/download.aspx?tempauth=v1.xyz",
+                "uniqueId": "abc-123",
+                "fileType": "png",
+            },
+        ),
+    ]
+
+    event, dispatch = await adapter._build_event(activity)
+    assert dispatch is True
+    assert event.message_type == MessageType.PHOTO
+    assert event.media_types == ["image/png"]
+
+    # The tempauth URL is used and no Authorization header is sent.
+    assert "tempauth" in captured["url"]
+    assert "Authorization" not in captured["headers"]
+
+
+@pytest.mark.asyncio
+async def test_build_event_skips_non_image_file_download_info(
+    tmp_path, monkeypatch,
+):
+    """A PDF upload comes as file.download.info too — don't route
+    it through the image pipeline."""
+    adapter = MsTeamsAdapter(_config(dm_policy="open"))
+    adapter._credential_provider = MagicMock()
+    adapter._credential_provider.get_token = AsyncMock(return_value="tok")
+
+    from gateway.platforms import base as base_mod
+    monkeypatch.setattr(base_mod, "get_image_cache_dir", lambda: tmp_path)
+
+    activity = _activity(text="see attached")
+    activity.attachments = [
+        SimpleNamespace(
+            content_type="application/vnd.microsoft.teams.file.download.info",
+            content_url="https://sp.example/doc.pdf",
+            name="doc.pdf",
+            content={
+                "downloadUrl": "https://sp.example/download.aspx?...",
+                "uniqueId": "u",
+                "fileType": "pdf",
+            },
+        ),
+    ]
+
+    event, dispatch = await adapter._build_event(activity)
+    assert dispatch is True
+    assert event.message_type == MessageType.TEXT
+    assert event.media_urls == []
+
+
+@pytest.mark.asyncio
 async def test_build_event_image_download_failure_skips_attachment(
     tmp_path, monkeypatch,
 ):
