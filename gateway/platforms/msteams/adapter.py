@@ -596,6 +596,14 @@ class MsTeamsAdapter(BasePlatformAdapter):
            the request).  This is what Teams web/desktop paste-images
            use today.
 
+        When the direct GET fails (403 / 410 / expired tempauth) AND
+        the activity carries enough context to address the attachment
+        through Graph (team + channel + message ids + a hostedContent
+        id extracted from the URL), the adapter falls back to
+        :meth:`GraphClient.download_hosted_content` so a tenant that
+        restricts anonymous hosted-content access still produces bytes
+        for the vision pipeline.
+
         Returns ``(media_urls, media_types)`` where ``media_urls`` are
         absolute paths to cached local files.  Failures for one
         attachment are logged and the rest are still returned.
@@ -612,6 +620,17 @@ class MsTeamsAdapter(BasePlatformAdapter):
 
         media_urls: List[str] = []
         media_types: List[str] = []
+
+        # Context needed for Graph fallback — parsed once per activity.
+        channel_data = getattr(activity, "channel_data", None) or {}
+        graph_team_id: Optional[str] = None
+        graph_channel_id: Optional[str] = None
+        graph_activity_id: str = str(getattr(activity, "id", "") or "")
+        if isinstance(channel_data, dict):
+            team = channel_data.get("team") or {}
+            channel = channel_data.get("channel") or {}
+            graph_team_id = team.get("id")
+            graph_channel_id = channel.get("id")
 
         # Mint the Bot Framework bearer once — reused for every image/*
         # download in this activity.  The SharePoint download.info path
@@ -678,20 +697,48 @@ class MsTeamsAdapter(BasePlatformAdapter):
                 if needs_bearer and bf_token
                 else {}
             )
+            data: Optional[bytes] = None
+            direct_failed = False
             try:
                 async with session.get(download_url, headers=headers) as resp:
-                    if resp.status != 200:
+                    if resp.status == 200:
+                        data = await resp.read()
+                    else:
+                        direct_failed = True
                         logger.warning(
                             "msteams: image download %s returned %s",
                             download_url[:80], resp.status,
                         )
-                        continue
-                    data = await resp.read()
             except Exception as exc:
+                direct_failed = True
                 logger.warning(
                     "msteams: image download failed (%s): %s",
                     download_url[:80], exc,
                 )
+
+            # Graph fallback — only attempted when the direct path
+            # failed AND we have enough context to address the
+            # attachment through the Teams channel API.  Hosted-content
+            # ids come from the contentUrl itself; SharePoint file
+            # uploads have no matching /hostedContents path, so the
+            # fallback no-ops for them.
+            if data is None and direct_failed and self._graph is not None:
+                hosted_id = _parse_hosted_content_id(download_url)
+                if hosted_id and graph_team_id and graph_channel_id and graph_activity_id:
+                    data = await self._graph.download_hosted_content(
+                        team_id=graph_team_id,
+                        channel_id=graph_channel_id,
+                        message_id=graph_activity_id,
+                        hosted_content_id=hosted_id,
+                    )
+                    if data is not None:
+                        logger.info(
+                            "msteams: recovered %s bytes via Graph "
+                            "hostedContents fallback (msg=%s, hc=%s)",
+                            len(data), graph_activity_id, hosted_id,
+                        )
+
+            if data is None:
                 continue
 
             try:
@@ -1212,6 +1259,26 @@ class MsTeamsAdapter(BasePlatformAdapter):
             filename=filename,
             content=content,
         )
+
+
+_HOSTED_CONTENT_RE = re.compile(
+    r"/hostedContents/([^/]+)(?:/\$value)?(?:[?#]|$)",
+    re.IGNORECASE,
+)
+
+
+def _parse_hosted_content_id(url: str) -> Optional[str]:
+    """Extract the ``hostedContents/{id}`` fragment from a Teams URL.
+
+    Returns the opaque id that Graph's
+    ``/teams/{team}/channels/{channel}/messages/{msg}/hostedContents/{id}``
+    endpoint expects, or ``None`` when the URL isn't shaped that way
+    (e.g. a SharePoint file-upload URL where no Graph fallback applies).
+    """
+    if not url:
+        return None
+    match = _HOSTED_CONTENT_RE.search(url)
+    return match.group(1) if match else None
 
 
 def _attr_or_key(obj, name: str, default=None):

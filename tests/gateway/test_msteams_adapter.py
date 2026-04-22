@@ -528,6 +528,122 @@ async def test_build_event_skips_non_image_file_download_info(
 
 
 @pytest.mark.asyncio
+async def test_build_event_falls_back_to_graph_hosted_content(
+    tmp_path, monkeypatch,
+):
+    """When the classic image/* URL returns 403 but the activity carries
+    team + channel + message + hostedContent context, the adapter must
+    fall back to GraphClient.download_hosted_content and still land the
+    bytes in the MessageEvent."""
+    adapter = MsTeamsAdapter(_config(dm_policy="open", require_mention=False))
+    adapter._credential_provider = MagicMock()
+    adapter._credential_provider.get_token = AsyncMock(return_value="bf-tok")
+
+    # Graph client with a fake download_hosted_content
+    fake_graph = MagicMock()
+    fake_graph.download_hosted_content = AsyncMock(return_value=_PNG_1x1)
+    adapter._graph = fake_graph
+
+    class _R:
+        status = 403
+        async def read(self_inner): return b"denied"
+        async def __aenter__(self_inner): return self_inner
+        async def __aexit__(self_inner, *exc): return False
+    class _S:
+        def get(self_inner, url, headers=None): return _R()
+    adapter._get_http_session = AsyncMock(return_value=_S())
+
+    from gateway.platforms import base as base_mod
+    monkeypatch.setattr(base_mod, "get_image_cache_dir", lambda: tmp_path)
+
+    activity = _activity(
+        conv_type="channel",
+        text="look",
+        channel_data={
+            "team": {"id": "team-1"},
+            "channel": {"id": "19:c@thread.tacv2"},
+        },
+    )
+    activity.attachments = [
+        SimpleNamespace(
+            content_type="image/png",
+            content_url=(
+                "https://graph.microsoft.com/v1.0/teams/team-1/channels/"
+                "19:c@thread.tacv2/messages/act-1/hostedContents/"
+                "aWQtaG9zdGVkLTEyMw==/$value"
+            ),
+        ),
+    ]
+
+    event, dispatch = await adapter._build_event(activity)
+    assert dispatch is True
+    assert event.message_type == MessageType.PHOTO
+    assert len(event.media_urls) == 1
+
+    fake_graph.download_hosted_content.assert_awaited_once()
+    kwargs = fake_graph.download_hosted_content.await_args.kwargs
+    assert kwargs["team_id"] == "team-1"
+    assert kwargs["channel_id"] == "19:c@thread.tacv2"
+    assert kwargs["message_id"] == "act-1"
+    assert kwargs["hosted_content_id"] == "aWQtaG9zdGVkLTEyMw=="
+
+
+@pytest.mark.asyncio
+async def test_build_event_graph_fallback_skipped_without_context(
+    tmp_path, monkeypatch,
+):
+    """A DM doesn't carry team/channel ids, so the Graph fallback must
+    be skipped — we still log the direct failure and drop the attachment."""
+    adapter = MsTeamsAdapter(_config(dm_policy="open"))
+    adapter._credential_provider = MagicMock()
+    adapter._credential_provider.get_token = AsyncMock(return_value="tok")
+    fake_graph = MagicMock()
+    fake_graph.download_hosted_content = AsyncMock(return_value=_PNG_1x1)
+    adapter._graph = fake_graph
+
+    class _R:
+        status = 403
+        async def read(self_inner): return b"denied"
+        async def __aenter__(self_inner): return self_inner
+        async def __aexit__(self_inner, *exc): return False
+    class _S:
+        def get(self_inner, url, headers=None): return _R()
+    adapter._get_http_session = AsyncMock(return_value=_S())
+
+    from gateway.platforms import base as base_mod
+    monkeypatch.setattr(base_mod, "get_image_cache_dir", lambda: tmp_path)
+
+    activity = _activity(text="please", channel_data={})  # DM → no team id
+    activity.attachments = [
+        SimpleNamespace(
+            content_type="image/png",
+            content_url="https://example.com/blocked.png",
+        ),
+    ]
+
+    event, dispatch = await adapter._build_event(activity)
+    assert dispatch is True
+    assert event.message_type == MessageType.TEXT
+    assert event.media_urls == []
+    fake_graph.download_hosted_content.assert_not_called()
+
+
+def test_parse_hosted_content_id():
+    from gateway.platforms.msteams.adapter import _parse_hosted_content_id
+    assert _parse_hosted_content_id(
+        "https://graph.microsoft.com/v1.0/teams/T/channels/C/messages/M/"
+        "hostedContents/abc-123/$value"
+    ) == "abc-123"
+    assert _parse_hosted_content_id(
+        "https://g.example/.../hostedContents/XYZ"
+    ) == "XYZ"
+    assert _parse_hosted_content_id(
+        "https://sharepoint/.../download.aspx?UniqueId=f"
+    ) is None
+    assert _parse_hosted_content_id("") is None
+
+
+@pytest.mark.asyncio
 async def test_build_event_image_download_failure_skips_attachment(
     tmp_path, monkeypatch,
 ):
