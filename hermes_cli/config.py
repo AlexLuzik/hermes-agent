@@ -613,6 +613,10 @@ DEFAULT_CONFIG = {
     },
     
     # Text-to-speech configuration
+    # Each provider supports an optional `max_text_length:` override for the
+    # per-request input-character cap. Omit it to use the provider's documented
+    # limit (OpenAI 4096, xAI 15000, MiniMax 10000, ElevenLabs 5k-40k model-aware,
+    # Gemini 5000, Edge 5000, Mistral 4000, NeuTTS/KittenTTS 2000).
     "tts": {
         "provider": "edge",  # "edge" (free) | "elevenlabs" (premium) | "openai" | "xai" | "minimax" | "mistral" | "neutts" (local)
         "edge": {
@@ -712,6 +716,12 @@ DEFAULT_CONFIG = {
                                # independent of the parent's max_iterations)
         "reasoning_effort": "",  # reasoning effort for subagents: "xhigh", "high", "medium",
                                  # "low", "minimal", "none" (empty = inherit parent's level)
+        "max_concurrent_children": 3,  # max parallel children per batch; floor of 1 enforced, no ceiling
+        # Orchestrator role controls (see tools/delegate_tool.py:_get_max_spawn_depth
+        # and _get_orchestrator_enabled).  Values are clamped to [1, 3] with a
+        # warning log if out of range.
+        "max_spawn_depth": 1,        # depth cap (1 = flat [default], 2 = orchestrator→leaf, 3 = three-level)
+        "orchestrator_enabled": True,  # kill switch for role="orchestrator"
     },
 
     # Ephemeral prefill messages file — JSON list of {role, content} dicts
@@ -883,6 +893,34 @@ DEFAULT_CONFIG = {
         "force_ipv4": False,
     },
 
+    # Session storage — controls automatic cleanup of ~/.hermes/state.db.
+    # state.db accumulates every session, message, tool call, and FTS5 index
+    # entry forever.  Without auto-pruning, a heavy user (gateway + cron)
+    # reports 384MB+ databases with 68K+ messages, which slows down FTS5
+    # inserts, /resume listing, and insights queries.
+    "sessions": {
+        # When true, prune ended sessions older than retention_days once
+        # per (roughly) min_interval_hours at CLI/gateway/cron startup.
+        # Only touches ended sessions — active sessions are always preserved.
+        # Default false: session history is valuable for search recall, and
+        # silently deleting it could surprise users.  Opt in explicitly.
+        "auto_prune": False,
+        # How many days of ended-session history to keep.  Matches the
+        # default of ``hermes sessions prune``.
+        "retention_days": 90,
+        # VACUUM after a prune that actually deleted rows.  SQLite does not
+        # reclaim disk space on DELETE — freed pages are just reused on
+        # subsequent INSERTs — so without VACUUM the file stays bloated
+        # even after pruning.  VACUUM blocks writes for a few seconds per
+        # 100MB, so it only runs at startup, and only when prune deleted
+        # ≥1 session.
+        "vacuum_after_prune": True,
+        # Minimum hours between auto-maintenance runs (avoids repeating
+        # the sweep on every CLI invocation).  Tracked via state_meta in
+        # state.db itself, so it's shared across all processes.
+        "min_interval_hours": 24,
+    },
+
     # Config schema version - bump this when adding new required fields
     "_config_version": 22,
 }
@@ -1037,6 +1075,22 @@ OPTIONAL_ENV_VARS = {
         "prompt": "Kimi (China) API key",
         "url": "https://platform.moonshot.cn/",
         "password": True,
+        "category": "provider",
+        "advanced": True,
+    },
+    "STEPFUN_API_KEY": {
+        "description": "StepFun Step Plan API key",
+        "prompt": "StepFun Step Plan API key",
+        "url": "https://platform.stepfun.com/",
+        "password": True,
+        "category": "provider",
+        "advanced": True,
+    },
+    "STEPFUN_BASE_URL": {
+        "description": "StepFun Step Plan base URL override",
+        "prompt": "StepFun Step Plan base URL (leave empty for default)",
+        "url": None,
+        "password": False,
         "category": "provider",
         "advanced": True,
     },
@@ -2092,6 +2146,7 @@ _KNOWN_ROOT_KEYS = {
     "fallback_providers", "credential_pool_strategies", "toolsets",
     "agent", "terminal", "display", "compression", "delegation",
     "auxiliary", "custom_providers", "context", "memory", "gateway",
+    "sessions",
 }
 
 # Valid fields inside a custom_providers list entry
