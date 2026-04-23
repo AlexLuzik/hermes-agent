@@ -27,6 +27,8 @@ export interface StateSetter<T> {
   (value: SetStateAction<T>): void
 }
 
+export type StatusBarMode = 'bottom' | 'off' | 'top'
+
 export interface SelectionApi {
   clearSelection: () => void
   copySelection: () => string
@@ -53,6 +55,8 @@ export interface GatewayProviderProps {
 }
 
 export interface OverlayState {
+  agents: boolean
+  agentsInitialHistoryIndex: number
   approval: ApprovalReq | null
   clarify: ClarifyReq | null
   confirm: ConfirmReq | null
@@ -87,7 +91,7 @@ export interface UiState {
   showReasoning: boolean
   sid: null | string
   status: string
-  statusBar: boolean
+  statusBar: StatusBarMode
   streaming: boolean
   theme: Theme
   usage: Usage
@@ -185,9 +189,11 @@ export interface InputHandlerContext {
     stdout?: NodeJS.WriteStream
   }
   voice: {
+    enabled: boolean
     recording: boolean
     setProcessing: StateSetter<boolean>
     setRecording: StateSetter<boolean>
+    setVoiceEnabled: StateSetter<boolean>
   }
   wheelStep: number
 }
@@ -197,6 +203,9 @@ export interface InputHandlerResult {
 }
 
 export interface GatewayEventHandlerContext {
+  composer: {
+    setInput: StateSetter<string>
+  }
   gateway: GatewayServices
   session: {
     STARTUP_RESUME_ID: string
@@ -205,6 +214,9 @@ export interface GatewayEventHandlerContext {
     resetSession: () => void
     resumeById: (id: string) => void
     setCatalog: StateSetter<null | SlashCatalog>
+  }
+  submission: {
+    submitRef: MutableRefObject<(value: string) => void>
   }
   system: {
     bellOnComplete: boolean
@@ -215,6 +227,11 @@ export interface GatewayEventHandlerContext {
     appendMessage: (msg: Msg) => void
     panel: (title: string, sections: PanelSection[]) => void
     setHistoryItems: StateSetter<Msg[]>
+  }
+  voice: {
+    setProcessing: StateSetter<boolean>
+    setRecording: StateSetter<boolean>
+    setVoiceEnabled: StateSetter<boolean>
   }
 }
 
