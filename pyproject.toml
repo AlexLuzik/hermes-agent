@@ -88,6 +88,7 @@ msteams = [
   "msgraph-sdk>=1.4,<2",
   "aiohttp>=3.13.3,<4",
 ]
+# `hermes dashboard` (localhost SPA + API).  Not in core to keep the default install lean.
 web = ["fastapi>=0.104.0,<1", "uvicorn[standard]>=0.24.0,<1"]
 rl = [
   "atroposlib @ git+https://github.com/NousResearch/atropos.git@c20c85256e5a45ad31edf8b7276e9c5ee1995a30",
