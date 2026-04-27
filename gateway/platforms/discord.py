@@ -2315,11 +2315,6 @@ class DiscordAdapter(BasePlatformAdapter):
         async def slash_background(interaction: discord.Interaction, prompt: str):
             await self._run_simple_slash(interaction, f"/background {prompt}", "Background task started~")
 
-        @tree.command(name="btw", description="Ephemeral side question using session context")
-        @discord.app_commands.describe(question="Your side question (no tools, not persisted)")
-        async def slash_btw(interaction: discord.Interaction, question: str):
-            await self._run_simple_slash(interaction, f"/btw {question}")
-
         # ── Auto-register any gateway-available commands not yet on the tree ──
         # This ensures new commands added to COMMAND_REGISTRY in
         # hermes_cli/commands.py automatically appear as Discord slash
@@ -3261,6 +3256,7 @@ class DiscordAdapter(BasePlatformAdapter):
             if auto_thread and not skip_thread and not is_voice_linked_channel and not is_reply_message:
                 thread = await self._auto_create_thread(message)
                 if thread:
+                    parent_channel_id = str(message.channel.id)
                     is_thread = True
                     thread_id = str(thread.id)
                     auto_threaded_channel = thread
@@ -3320,6 +3316,9 @@ class DiscordAdapter(BasePlatformAdapter):
             thread_id=thread_id,
             chat_topic=chat_topic,
             is_bot=getattr(message.author, "bot", False),
+            guild_id=str(message.guild.id) if message.guild else None,
+            parent_chat_id=parent_channel_id,
+            message_id=str(message.id),
         )
 
         # Build media URLs -- download image attachments to local cache so the
