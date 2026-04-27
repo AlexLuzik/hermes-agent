@@ -980,19 +980,25 @@ class MsTeamsAdapter(BasePlatformAdapter):
         image_path: str,
         caption: Optional[str] = None,
         reply_to: Optional[str] = None,
-        metadata=None,
+        **kwargs,
     ) -> SendResult:
         return await self._send_local_file(chat_id, image_path, caption, reply_to)
 
     async def send_document(
         self,
         chat_id: str,
-        document_path: str,
+        file_path: str,
         caption: Optional[str] = None,
+        file_name: Optional[str] = None,
         reply_to: Optional[str] = None,
-        metadata=None,
+        **kwargs,
     ) -> SendResult:
-        return await self._send_local_file(chat_id, document_path, caption, reply_to)
+        # ``file_name`` is accepted for parity with
+        # :meth:`BasePlatformAdapter.send_document` — the FileConsentCard
+        # always shows the on-disk basename, so the override-supplied
+        # name is currently informational only.
+        del file_name
+        return await self._send_local_file(chat_id, file_path, caption, reply_to)
 
     async def send_video(
         self,
@@ -1000,7 +1006,7 @@ class MsTeamsAdapter(BasePlatformAdapter):
         video_path: str,
         caption: Optional[str] = None,
         reply_to: Optional[str] = None,
-        metadata=None,
+        **kwargs,
     ) -> SendResult:
         return await self._send_local_file(chat_id, video_path, caption, reply_to)
 

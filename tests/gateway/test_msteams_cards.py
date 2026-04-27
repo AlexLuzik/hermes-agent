@@ -231,6 +231,43 @@ class _RecordingSession:
 
 
 @pytest.mark.asyncio
+async def test_overridden_send_methods_match_base_signatures(tmp_path, monkeypatch):
+    """Regression: BasePlatformAdapter.send_document calls with file_path=,
+    file_name=, metadata= keywords.  An earlier override used document_path=
+    instead, raising ``unexpected keyword argument 'file_path'`` whenever a
+    PDF/DOCX response landed in a Teams chat.  Same kwarg shape applies to
+    send_image_file (image_path=), send_video (video_path=).  These calls
+    must not TypeError.
+    """
+    adapter = _connected_adapter()
+    fake = _RecordingSession()
+    adapter._get_http_session = AsyncMock(return_value=fake)
+    monkeypatch.setattr(
+        msteams_adapter, "_service_urls_path", lambda: tmp_path / "svc.json",
+    )
+
+    f = tmp_path / "report.pdf"
+    f.write_bytes(b"%PDF-1.4\n")
+
+    # Mirrors gateway.platforms.base.BasePlatformAdapter._dispatch_send call shapes.
+    r1 = await adapter.send_document(
+        chat_id="dm-chat", file_path=str(f),
+        file_name="report.pdf", metadata={"thread_id": None},
+    )
+    assert r1.success is True
+
+    r2 = await adapter.send_image_file(
+        chat_id="dm-chat", image_path=str(f), metadata={"thread_id": None},
+    )
+    assert r2.success is True
+
+    r3 = await adapter.send_video(
+        chat_id="dm-chat", video_path=str(f), metadata={"thread_id": None},
+    )
+    assert r3.success is True
+
+
+@pytest.mark.asyncio
 async def test_send_document_dm_triggers_file_consent(tmp_path, monkeypatch):
     adapter = _connected_adapter()
     fake = _RecordingSession()
