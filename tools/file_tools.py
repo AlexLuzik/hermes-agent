@@ -214,6 +214,11 @@ _read_tracker: dict = {}
 _READ_HISTORY_CAP = 500       # set; used only by get_read_files_summary
 _DEDUP_CAP = 1000             # dict; skip-identical-reread guard
 _READ_TIMESTAMPS_CAP = 1000   # dict; external-edit detection for write/patch
+_READ_DEDUP_STATUS_MESSAGE = (
+    "File unchanged since last read. The content from "
+    "the earlier read_file result in this conversation is "
+    "still current — refer to that instead of re-reading."
+)
 
 
 def _cap_read_tracker_data(task_data: dict) -> None:
@@ -256,6 +261,37 @@ def _cap_read_tracker_data(task_data: dict) -> None:
                 ts.pop(next(iter(ts)))
             except (StopIteration, KeyError):
                 break
+
+
+def _is_internal_file_status_text(content: str) -> bool:
+    """Return True when content looks like an internal file-tool status, not real file bytes.
+
+    The read_file dedup status message must never be persisted as file
+    content.  The obvious shape is the model echoing the message verbatim,
+    but in practice it also wraps it with small framing text (a leading
+    "Note:", a trailing newline + short comment, etc.) before calling
+    write_file.  We treat any short-ish write whose body is dominated by
+    the status message as the same class of corruption.
+
+    Heuristic:
+      * Strict equality (after strip) — the verbatim shape.
+      * OR the stripped content contains the full status message AND is
+        short enough that the status dominates it (<=2x the message length).
+        Short, status-dominated writes can't plausibly be real files —
+        legitimate docs/notes that happen to quote this internal message
+        are always dramatically longer.
+    """
+    if not isinstance(content, str):
+        return False
+    stripped = content.strip()
+    if not stripped:
+        return False
+    if stripped == _READ_DEDUP_STATUS_MESSAGE:
+        return True
+    if _READ_DEDUP_STATUS_MESSAGE in stripped and \
+            len(stripped) <= 2 * len(_READ_DEDUP_STATUS_MESSAGE):
+        return True
+    return False
 
 
 def _get_file_ops(task_id: str = "default") -> ShellFileOperations:
@@ -451,13 +487,11 @@ def read_file_tool(path: str, offset: int = 1, limit: int = 500, task_id: str = 
                 current_mtime = os.path.getmtime(resolved_str)
                 if current_mtime == cached_mtime:
                     return json.dumps({
-                        "content": (
-                            "File unchanged since last read. The content from "
-                            "the earlier read_file result in this conversation is "
-                            "still current — refer to that instead of re-reading."
-                        ),
+                        "status": "unchanged",
+                        "message": _READ_DEDUP_STATUS_MESSAGE,
                         "path": path,
                         "dedup": True,
+                        "content_returned": False,
                     }, ensure_ascii=False)
             except OSError:
                 pass  # stat failed — fall through to full read
@@ -612,13 +646,48 @@ def notify_other_tool_call(task_id: str = "default"):
             task_data["consecutive"] = 0
 
 
+def _invalidate_dedup_for_path(filepath: str, task_id: str) -> None:
+    """Remove all dedup cache entries whose resolved path matches *filepath*.
+
+    Called after write_file and patch so that a subsequent read_file on
+    the same path always returns fresh content instead of a stale
+    "File unchanged" stub.  The dedup cache keys are tuples of
+    ``(resolved_path, offset, limit)``; we must evict **all** offset/limit
+    combinations for the written path because any cached range could now
+    be stale.
+
+    Must be called with ``_read_tracker_lock`` **not** held — acquires it
+    internally.
+    """
+    try:
+        resolved = str(_resolve_path(filepath))
+    except (OSError, ValueError):
+        return
+    with _read_tracker_lock:
+        task_data = _read_tracker.get(task_id)
+        if task_data is None:
+            return
+        dedup = task_data.get("dedup")
+        if not dedup:
+            return
+        # Collect keys to remove (can't mutate dict during iteration).
+        stale_keys = [k for k in dedup if k[0] == resolved]
+        for k in stale_keys:
+            del dedup[k]
+
+
 def _update_read_timestamp(filepath: str, task_id: str) -> None:
     """Record the file's current modification time after a successful write.
 
     Called after write_file and patch so that consecutive edits by the
     same task don't trigger false staleness warnings — each write
     refreshes the stored timestamp to match the file's new state.
+
+    Also invalidates the dedup cache for the written path so that
+    subsequent reads return fresh content (fixes #13144).
     """
+    # Invalidate dedup first (before acquiring lock for timestamp update).
+    _invalidate_dedup_for_path(filepath, task_id)
     try:
         resolved = str(_resolve_path_for_task(filepath, task_id))
         current_mtime = os.path.getmtime(resolved)
@@ -667,6 +736,11 @@ def write_file_tool(path: str, content: str, task_id: str = "default") -> str:
     sensitive_err = _check_sensitive_path(path, task_id)
     if sensitive_err:
         return tool_error(sensitive_err)
+    if _is_internal_file_status_text(content):
+        return tool_error(
+            "Refusing to write internal read_file status text as file content. "
+            "Re-read the file or reconstruct the intended file contents before writing."
+        )
     try:
         # Resolve once for the registry lock + stale check.  Failures here
         # fall back to the legacy path — write proceeds, per-task staleness

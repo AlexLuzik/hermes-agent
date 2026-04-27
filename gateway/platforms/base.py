@@ -336,6 +336,39 @@ def proxy_kwargs_for_aiohttp(proxy_url: str | None) -> tuple[dict, dict]:
     return {}, {"proxy": proxy_url}
 
 
+def is_host_excluded_by_no_proxy(hostname: str, no_proxy_value: str | None = None) -> bool:
+    """Return True when ``hostname`` matches a ``NO_PROXY`` entry.
+
+    Supports comma- or whitespace-separated entries with optional leading dots
+    and ``*.`` wildcards, which match both the apex domain and subdomains.
+    """
+    raw = no_proxy_value
+    if raw is None:
+        raw = os.environ.get("NO_PROXY") or os.environ.get("no_proxy") or ""
+
+    raw = raw.strip()
+    if not raw:
+        return False
+
+    lower_hostname = hostname.lower()
+    for entry in re.split(r"[\s,]+", raw):
+        normalized = entry.strip().lower()
+        if not normalized:
+            continue
+        if normalized == "*":
+            return True
+
+        if normalized.startswith("*."):
+            normalized = normalized[2:]
+        elif normalized.startswith("."):
+            normalized = normalized[1:]
+
+        if lower_hostname == normalized or lower_hostname.endswith(f".{normalized}"):
+            return True
+
+    return False
+
+
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -693,7 +726,15 @@ SUPPORTED_DOCUMENT_TYPES = {
     ".pdf": "application/pdf",
     ".md": "text/markdown",
     ".txt": "text/plain",
+    ".csv": "text/csv",
     ".log": "text/plain",
+    ".json": "application/json",
+    ".xml": "application/xml",
+    ".yaml": "application/yaml",
+    ".yml": "application/yaml",
+    ".toml": "application/toml",
+    ".ini": "text/plain",
+    ".cfg": "text/plain",
     ".zip": "application/zip",
     ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
     ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -979,6 +1020,61 @@ def resolve_channel_prompt(
         prompt = str(prompt).strip()
         if prompt:
             return prompt
+    return None
+
+
+def resolve_channel_skills(
+    config_extra: dict,
+    channel_id: str,
+    parent_id: str | None = None,
+) -> list[str] | None:
+    """Resolve auto-loaded skill(s) for a channel/thread from platform config.
+
+    Looks up ``channel_skill_bindings`` in the adapter's ``config.extra`` dict.
+
+    Config format::
+
+        channel_skill_bindings:
+          - id: "C0123"          # Slack channel ID or Discord channel/forum ID
+            skills: ["skill-a", "skill-b"]
+          - id: "D0ABCDE"
+            skill: "solo-skill"  # single string also accepted
+
+    Prefers an exact match on *channel_id*; falls back to *parent_id*
+    (useful for forum threads / Slack threads inheriting the parent channel's
+    binding).
+
+    Returns a deduplicated list of skill names (order preserved), or None if
+    no match is found.
+    """
+    bindings = config_extra.get("channel_skill_bindings") or []
+    if not isinstance(bindings, list) or not bindings:
+        return None
+    ids_to_check: set[str] = set()
+    if channel_id:
+        ids_to_check.add(str(channel_id))
+    if parent_id:
+        ids_to_check.add(str(parent_id))
+    if not ids_to_check:
+        return None
+    for entry in bindings:
+        if not isinstance(entry, dict):
+            continue
+        entry_id = str(entry.get("id", ""))
+        if entry_id in ids_to_check:
+            skills = entry.get("skills") or entry.get("skill")
+            if isinstance(skills, str):
+                s = skills.strip()
+                return [s] if s else None
+            if isinstance(skills, list) and skills:
+                seen: list[str] = []
+                for name in skills:
+                    if not isinstance(name, str):
+                        continue
+                    nm = name.strip()
+                    if nm and nm not in seen:
+                        seen.append(nm)
+                return seen or None
     return None
 
 
