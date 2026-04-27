@@ -593,7 +593,10 @@ async def _send_to_platform(platform, pconfig, chat_id, message, thread_id=None,
         elif platform == Platform.MATRIX:
             result = await _send_matrix(pconfig.token, pconfig.extra, chat_id, chunk)
         elif platform == Platform.MSTEAMS:
-            result = await _send_msteams(pconfig.extra, chat_id, chunk, thread_id=thread_id)
+            result = await _send_msteams(
+                pconfig.extra, chat_id, chunk,
+                thread_id=thread_id, media_files=media_files,
+            )
         elif platform == Platform.HOMEASSISTANT:
             result = await _send_homeassistant(pconfig.token, pconfig.extra, chat_id, chunk)
         elif platform == Platform.DINGTALK:
@@ -1234,7 +1237,7 @@ async def _send_matrix(token, extra, chat_id, message):
         return _error(f"Matrix send failed: {e}")
 
 
-async def _send_msteams(extra, chat_id, message, thread_id=None):
+async def _send_msteams(extra, chat_id, message, thread_id=None, media_files=None):
     """Send a message directly to Microsoft Teams without the gateway.
 
     Used by :func:`send_message_tool` and the cron scheduler when the
@@ -1259,6 +1262,26 @@ async def _send_msteams(extra, chat_id, message, thread_id=None):
        applies.  ``thread_id`` (when supplied) is used as the
        ``replyToId`` so cron results land inside the triggering thread.
     """
+    # MEDIA: tokens are not deliverable through the gateway-less helper —
+    # FileConsent (DM) and SharePoint upload (channel) require the live
+    # adapter's pending-upload state and aiohttp session.  Fail loudly
+    # with an instructive message so the agent learns to put MEDIA:/path
+    # in its REPLY TEXT instead of routing it through this tool.
+    if media_files:
+        names = ", ".join(p for p, _ in media_files[:3])
+        return _error(
+            "Microsoft Teams file delivery does NOT go through the "
+            "send_message tool.  To send the file(s) to the user "
+            "(" + names + "), put MEDIA:/absolute/path/to/file directly in "
+            "your normal reply text — the gateway adapter's media "
+            "extraction will route it through FileConsent (DMs) or "
+            "SharePoint (channels).  send_message only carries plain "
+            "text on Teams.  Do NOT tell the user Teams 'doesn't allow' "
+            "files — the platform supports PDFs, DOCX, XLSX, PPTX, ZIP, "
+            "TXT and images; the limitation is purely which transport "
+            "you used."
+        )
+
     try:
         import aiohttp
     except ImportError:
