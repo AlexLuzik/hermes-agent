@@ -119,10 +119,23 @@ def test_file_consent_card_shape():
 def test_file_info_card_shape():
     card = build_file_info_card(
         filename="x.png", unique_id="uniq-1", file_type="png",
+        content_url="https://sp.example/x.png",
     )
     assert card["contentType"] == FILE_INFO_CONTENT_TYPE
+    assert card["name"] == "x.png"
+    assert card["contentUrl"] == "https://sp.example/x.png"
     assert card["content"]["uniqueId"] == "uniq-1"
     assert card["content"]["fileType"] == "png"
+
+
+def test_file_info_card_omits_content_url_when_blank():
+    """Backward-compat shape — older callers that don't have a SharePoint
+    URL still produce a valid attachment object (Teams will render as a
+    minimal file chiclet)."""
+    card = build_file_info_card(
+        filename="x.png", unique_id="uniq-1", file_type="png",
+    )
+    assert "contentUrl" not in card
 
 
 def test_file_download_card_shape():
@@ -271,6 +284,7 @@ async def test_file_consent_invoke_uploads_and_follows_up(tmp_path, monkeypatch)
             "context": {"upload_id": upload_id},
             "uploadInfo": {
                 "uploadUrl": "https://onedrive.example/upload/x",
+                "contentUrl": "https://sp.example/Documents/hello.txt",
                 "uniqueId": "uid-1",
                 "fileType": "txt",
             },
@@ -286,10 +300,15 @@ async def test_file_consent_invoke_uploads_and_follows_up(tmp_path, monkeypatch)
     assert puts[0]["url"] == "https://onedrive.example/upload/x"
     assert puts[0]["data"] == b"payload"
 
-    # Follow-up POST with FileInfoCard
+    # Follow-up POST with FileInfoCard — Teams' FileInfoCard schema needs
+    # contentUrl at the top level (the SharePoint webUrl) or it returns
+    # BadSyntax: "An exception occurred when converting file info card to
+    # file chiclet".
     posts = [c for c in fake.calls if c["method"] == "POST"]
     info_card = posts[-1]["json"]["attachments"][0]
     assert info_card["contentType"] == FILE_INFO_CONTENT_TYPE
+    assert info_card["contentUrl"] == "https://sp.example/Documents/hello.txt"
+    assert info_card["name"] == "hello.txt"
     assert info_card["content"]["uniqueId"] == "uid-1"
     assert info_card["content"]["fileType"] == "txt"
 

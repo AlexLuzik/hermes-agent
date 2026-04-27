@@ -87,6 +87,7 @@ msteams = [
   "azure-identity>=1.17,<2",
   "msgraph-sdk>=1.4,<2",
   "aiohttp>=3.13.3,<4",
+]
 google = [
   # Required by the google-workspace skill (Gmail, Calendar, Drive, Contacts,
   # Sheets, Docs).  Declared here so packagers (Nix, Homebrew) ship them with

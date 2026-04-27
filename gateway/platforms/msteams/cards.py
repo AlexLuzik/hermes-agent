@@ -248,17 +248,28 @@ def build_file_info_card(
     filename: str,
     unique_id: str,
     file_type: str,
+    content_url: str = "",
 ) -> Dict[str, Any]:
     """Post-upload card that makes the newly-uploaded file render as a
-    first-class attachment in the DM."""
-    return {
+    first-class attachment in the DM.
+
+    Teams' FileInfoCard schema requires ``contentUrl`` at the top level
+    (the SharePoint webUrl returned in the FileConsent invoke's
+    ``uploadInfo.contentUrl``).  Without it, Teams rejects the message
+    with ``BadSyntax — An exception occurred when converting file info
+    card to file chiclet``.
+    """
+    card: Dict[str, Any] = {
         "contentType": FILE_INFO_CONTENT_TYPE,
+        "name": filename,
         "content": {
             "uniqueId": unique_id,
             "fileType": file_type,
         },
-        "name": filename,
     }
+    if content_url:
+        card["contentUrl"] = content_url
+    return card
 
 
 # ---------------------------------------------------------------------------

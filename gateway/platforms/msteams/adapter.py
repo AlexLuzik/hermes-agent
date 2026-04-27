@@ -1133,7 +1133,10 @@ class MsTeamsAdapter(BasePlatformAdapter):
         pending = self._pending_uploads.pop(upload_id, None) if upload_id else None
         if pending is None:
             logger.info(
-                "msteams: fileConsent invoke for unknown upload_id=%r", upload_id,
+                "msteams: fileConsent invoke for unknown upload_id=%r "
+                "(stale card from a previous gateway run, or the bot was "
+                "restarted between sending the card and the user clicking "
+                "Allow)", upload_id,
             )
             return 200
         if action != "accept":
@@ -1146,6 +1149,7 @@ class MsTeamsAdapter(BasePlatformAdapter):
         upload_url = upload_info.get("uploadUrl")
         unique_id = upload_info.get("uniqueId") or ""
         file_type = upload_info.get("fileType") or ""
+        content_url = upload_info.get("contentUrl") or ""
         if not upload_url:
             logger.warning(
                 "msteams: fileConsent/invoke missing uploadInfo.uploadUrl",
@@ -1179,12 +1183,18 @@ class MsTeamsAdapter(BasePlatformAdapter):
             filename=pending["filename"],
             unique_id=unique_id,
             file_type=file_type or "file",
+            content_url=content_url,
         )
         follow_payload: Dict[str, Any] = {
             "type": "message",
             "attachments": [info_card],
         }
-        await self._post_activity(pending["chat_id"], follow_payload)
+        result = await self._post_activity(pending["chat_id"], follow_payload)
+        if not result.success:
+            logger.warning(
+                "msteams: FileInfoCard post-upload reply failed: %s",
+                result.error,
+            )
         return 200
 
     async def _download_bytes(self, url: str) -> Tuple[Optional[bytes], Optional[str]]:
